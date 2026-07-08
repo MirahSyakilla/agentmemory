@@ -22,6 +22,8 @@
 
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com";
 const HTTP_ERROR_BODY_LIMIT = 500;
+const MUSKAPI_PRIMARY_HOST = "api.muskapi.cc";
+const MUSKAPI_FALLBACK_HOST = "api-slb.muskapi.cc";
 
 // Default api-version for the legacy Azure URL pattern. Only used
 // when the configured base URL carries `/deployments/` AND
@@ -175,6 +177,52 @@ export function buildAuthHeaders(
 
 export function normalizeBaseUrl(raw: string | undefined): string {
   return (raw || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
+}
+
+export function resolveAlternateBaseUrl(
+  primaryBaseUrl: string,
+  explicitFallbackBaseUrl?: string | null,
+): string | null {
+  const primary = normalizeBaseUrl(primaryBaseUrl);
+  const explicit = normalizeOptionalBaseUrl(explicitFallbackBaseUrl);
+  if (explicit) return explicit === primary ? null : explicit;
+
+  try {
+    const url = new URL(primary);
+    if (url.hostname !== MUSKAPI_PRIMARY_HOST) return null;
+    url.protocol = "https:";
+    url.hostname = MUSKAPI_FALLBACK_HOST;
+    const fallback = normalizeBaseUrl(url.toString());
+    return fallback === primary ? null : fallback;
+  } catch {
+    return null;
+  }
+}
+
+export function isAlternateBaseRetryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+type AlternateBaseRetryableError = Error & { retryAlternateBase?: true };
+
+export function markAlternateBaseRetryable<T extends Error>(error: T): T {
+  (error as AlternateBaseRetryableError).retryAlternateBase = true;
+  return error;
+}
+
+export function isAlternateBaseRetryableError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    (error as AlternateBaseRetryableError).retryAlternateBase === true,
+  );
+}
+
+function normalizeOptionalBaseUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return normalizeBaseUrl(trimmed);
 }
 
 export function formatHttpErrorBody(raw: string): string {

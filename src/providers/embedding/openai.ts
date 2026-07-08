@@ -3,11 +3,15 @@ import { getEnvVar } from "../../config.js";
 import { fetchWithTimeout } from "../_fetch.js";
 import {
   DEFAULT_AZURE_API_VERSION,
+  isAlternateBaseRetryableError,
+  isAlternateBaseRetryableStatus,
+  markAlternateBaseRetryable,
   buildAuthHeaders,
   buildEmbeddingUrl,
   detectAzure,
   formatHttpErrorBody,
   normalizeBaseUrl,
+  resolveAlternateBaseUrl,
 } from "../_openai-shared.js";
 
 const DEFAULT_MODEL = "text-embedding-3-small";
@@ -79,8 +83,10 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   readonly dimensions: number;
   private apiKey: string;
   private baseUrl: string;
+  private fallbackBaseUrl: string | null;
   private model: string;
   private isAzure: boolean;
+  private fallbackIsAzure: boolean;
   private azureApiVersion: string;
 
   constructor(apiKey?: string) {
@@ -104,12 +110,20 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     this.baseUrl = normalizeBaseUrl(
       getEnvVar("OPENAI_EMBEDDING_BASE_URL") || getEnvVar("OPENAI_BASE_URL"),
     );
+    this.fallbackBaseUrl = resolveAlternateBaseUrl(
+      this.baseUrl,
+      getEnvVar("OPENAI_EMBEDDING_FALLBACK_BASE_URL") ||
+        getEnvVar("OPENAI_FALLBACK_BASE_URL"),
+    );
     this.model = getEnvVar("OPENAI_EMBEDDING_MODEL") || DEFAULT_MODEL;
     this.dimensions = resolveDimensions(
       this.model,
       getEnvVar("OPENAI_EMBEDDING_DIMENSIONS"),
     );
     this.isAzure = detectAzure(this.baseUrl);
+    this.fallbackIsAzure = this.fallbackBaseUrl
+      ? detectAzure(this.fallbackBaseUrl)
+      : false;
     this.azureApiVersion =
       getEnvVar("OPENAI_API_VERSION") || DEFAULT_AZURE_API_VERSION;
   }
@@ -120,25 +134,57 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embedBatch(texts: string[]): Promise<Float32Array[]> {
+    try {
+      return await this.embedBatchWithBase(this.baseUrl, this.isAzure, texts);
+    } catch (err) {
+      if (
+        !this.fallbackBaseUrl ||
+        !isAlternateBaseRetryableError(err)
+      ) {
+        throw err;
+      }
+      return this.embedBatchWithBase(
+        this.fallbackBaseUrl,
+        this.fallbackIsAzure,
+        texts,
+      );
+    }
+  }
+
+  private async embedBatchWithBase(
+    baseUrl: string,
+    isAzure: boolean,
+    texts: string[],
+  ): Promise<Float32Array[]> {
     const url = buildEmbeddingUrl(
-      this.baseUrl,
-      this.isAzure,
+      baseUrl,
+      isAzure,
       this.azureApiVersion,
     );
-    const response = await fetchWithTimeout(url, {
-      method: "POST",
-      headers: buildAuthHeaders(this.apiKey, this.isAzure),
-      body: JSON.stringify({
-        model: this.model,
-        input: texts,
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(url, {
+        method: "POST",
+        headers: buildAuthHeaders(this.apiKey, isAzure),
+        body: JSON.stringify({
+          model: this.model,
+          input: texts,
+        }),
+      });
+    } catch (err) {
+      if (err instanceof Error) throw markAlternateBaseRetryable(err);
+      throw err;
+    }
 
     if (!response.ok) {
       const err = await response.text();
-      throw new Error(
+      const error = new Error(
         `OpenAI embedding failed (${response.status}): ${formatHttpErrorBody(err)}`,
       );
+      if (isAlternateBaseRetryableStatus(response.status)) {
+        throw markAlternateBaseRetryable(error);
+      }
+      throw error;
     }
 
     const data = (await response.json()) as {

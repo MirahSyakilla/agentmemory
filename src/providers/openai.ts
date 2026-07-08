@@ -3,15 +3,18 @@ import { getEnvVar } from "../config.js";
 import { fetchWithTimeout } from "./_fetch.js";
 import {
   DEFAULT_AZURE_API_VERSION,
+  isAlternateBaseRetryableError,
+  isAlternateBaseRetryableStatus,
+  markAlternateBaseRetryable,
   buildAuthHeaders,
   buildChatUrl,
   buildResponseUrl,
   detectAzure,
   formatHttpErrorBody,
   normalizeBaseUrl,
+  resolveAlternateBaseUrl,
 } from "./_openai-shared.js";
 
-const DEFAULT_MODEL = "gpt-4o-mini";
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
@@ -49,9 +52,11 @@ export class OpenAIProvider implements MemoryProvider {
   private model: string;
   private maxTokens: number;
   private baseUrl: string;
+  private fallbackBaseUrl: string | null;
   private reasoningEffort?: string;
   private timeoutMs: number;
   private isAzure: boolean;
+  private fallbackIsAzure: boolean;
   private azureApiVersion: string;
 
   constructor(apiKey: string, model: string, maxTokens: number, baseURL?: string) {
@@ -59,11 +64,18 @@ export class OpenAIProvider implements MemoryProvider {
     this.model = model;
     this.maxTokens = maxTokens;
     this.baseUrl = normalizeBaseUrl(baseURL || getEnvVar("OPENAI_BASE_URL"));
+    this.fallbackBaseUrl = resolveAlternateBaseUrl(
+      this.baseUrl,
+      getEnvVar("OPENAI_FALLBACK_BASE_URL"),
+    );
     this.reasoningEffort = getEnvVar("OPENAI_REASONING_EFFORT") || undefined;
     this.timeoutMs = resolveTimeout();
     this.azureApiVersion =
       getEnvVar("OPENAI_API_VERSION") || DEFAULT_AZURE_API_VERSION;
     this.isAzure = detectAzure(this.baseUrl);
+    this.fallbackIsAzure = this.fallbackBaseUrl
+      ? detectAzure(this.fallbackBaseUrl)
+      : false;
   }
 
   async compress(systemPrompt: string, userPrompt: string): Promise<string> {
@@ -75,7 +87,41 @@ export class OpenAIProvider implements MemoryProvider {
   }
 
   private async call(systemPrompt: string, userPrompt: string): Promise<string> {
-    const response = await this.sendResponses(systemPrompt, userPrompt);
+    try {
+      return await this.callWithBase(
+        this.baseUrl,
+        this.isAzure,
+        systemPrompt,
+        userPrompt,
+      );
+    } catch (err) {
+      if (
+        !this.fallbackBaseUrl ||
+        !isAlternateBaseRetryableError(err)
+      ) {
+        throw err;
+      }
+      return this.callWithBase(
+        this.fallbackBaseUrl,
+        this.fallbackIsAzure,
+        systemPrompt,
+        userPrompt,
+      );
+    }
+  }
+
+  private async callWithBase(
+    baseUrl: string,
+    isAzure: boolean,
+    systemPrompt: string,
+    userPrompt: string,
+  ): Promise<string> {
+    const response = await this.sendResponses(
+      baseUrl,
+      isAzure,
+      systemPrompt,
+      userPrompt,
+    );
     if (response.ok) {
       const data = (await response.json()) as ResponsesPayload;
       const content = extractResponsesText(data);
@@ -87,20 +133,28 @@ export class OpenAIProvider implements MemoryProvider {
 
     const errorText = await response.text();
     if (shouldFallbackToChat(response.status, errorText)) {
-      return this.callChat(systemPrompt, userPrompt);
+      return this.callChat(baseUrl, isAzure, systemPrompt, userPrompt);
     }
-    throw new Error(
+    const error = new Error(
       `OpenAI API error (${response.status}): ${formatHttpErrorBody(errorText)}`,
     );
+    if (isAlternateBaseRetryableStatus(response.status)) {
+      throw markAlternateBaseRetryable(error);
+    }
+    throw error;
   }
 
   private async sendResponses(
+    baseUrl: string,
+    isAzure: boolean,
     systemPrompt: string,
     userPrompt: string,
   ): Promise<Response> {
     let includeTokenCap = true;
     while (true) {
       const response = await this.sendResponsesRequest(
+        baseUrl,
+        isAzure,
         systemPrompt,
         userPrompt,
         includeTokenCap,
@@ -119,13 +173,15 @@ export class OpenAIProvider implements MemoryProvider {
   }
 
   private async sendResponsesRequest(
+    baseUrl: string,
+    isAzure: boolean,
     systemPrompt: string,
     userPrompt: string,
     includeTokenCap: boolean,
   ): Promise<Response> {
     const url = buildResponseUrl(
-      this.baseUrl,
-      this.isAzure,
+      baseUrl,
+      isAzure,
       this.azureApiVersion,
     );
     const body: Record<string, unknown> = {
@@ -140,14 +196,16 @@ export class OpenAIProvider implements MemoryProvider {
     if (this.reasoningEffort && this.reasoningEffort !== "none") {
       body.reasoning = { effort: this.reasoningEffort };
     }
-    return this.fetchJson(url, body);
+    return this.fetchJson(url, body, isAzure);
   }
 
   private async callChat(
+    baseUrl: string,
+    isAzure: boolean,
     systemPrompt: string,
     userPrompt: string,
   ): Promise<string> {
-    const url = buildChatUrl(this.baseUrl, this.isAzure, this.azureApiVersion);
+    const url = buildChatUrl(baseUrl, isAzure, this.azureApiVersion);
     const body: Record<string, unknown> = {
       model: this.model,
       // OpenAI API spec defines `stream` as defaulting to false, so omitting
@@ -166,12 +224,16 @@ export class OpenAIProvider implements MemoryProvider {
     if (this.reasoningEffort) {
       body.reasoning_effort = this.reasoningEffort;
     }
-    const response = await this.fetchJson(url, body);
+    const response = await this.fetchJson(url, body, isAzure);
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(
+      const error = new Error(
         `OpenAI API error (${response.status}): ${formatHttpErrorBody(text)}`,
       );
+      if (isAlternateBaseRetryableStatus(response.status)) {
+        throw markAlternateBaseRetryable(error);
+      }
+      throw error;
     }
     const data = (await response.json()) as ChatCompletionsPayload;
     const content = extractChatText(data);
@@ -184,6 +246,7 @@ export class OpenAIProvider implements MemoryProvider {
   private async fetchJson(
     url: string,
     body: Record<string, unknown>,
+    isAzure: boolean,
   ): Promise<Response> {
     // Bound the request via the shared fetchWithTimeout helper, which
     // owns the AbortController + clearTimeout cleanup for every raw-fetch
@@ -197,7 +260,7 @@ export class OpenAIProvider implements MemoryProvider {
         url,
         {
           method: "POST",
-          headers: buildAuthHeaders(this.apiKey, this.isAzure),
+          headers: buildAuthHeaders(this.apiKey, isAzure),
           body: JSON.stringify(body),
         },
         this.timeoutMs,
@@ -205,10 +268,11 @@ export class OpenAIProvider implements MemoryProvider {
     } catch (err) {
       const aborted = err instanceof Error && err.name === "AbortError";
       if (aborted) {
-        throw new Error(
+        throw markAlternateBaseRetryable(new Error(
           `OpenAI API request timed out after ${this.timeoutMs}ms — set OPENAI_TIMEOUT_MS (or AGENTMEMORY_LLM_TIMEOUT_MS) to raise the bound or check the provider status.`,
-        );
+        ));
       }
+      if (err instanceof Error) throw markAlternateBaseRetryable(err);
       throw err;
     }
     return response;

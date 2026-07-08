@@ -62,6 +62,8 @@ describe("OpenAIEmbeddingProvider", () => {
     delete process.env["OPENAI_EMBEDDING_API_KEY"];
     delete process.env["OPENAI_EMBEDDING_MODEL"];
     delete process.env["OPENAI_EMBEDDING_DIMENSIONS"];
+    delete process.env["OPENAI_FALLBACK_BASE_URL"];
+    delete process.env["OPENAI_EMBEDDING_FALLBACK_BASE_URL"];
   });
 
   afterEach(() => {
@@ -154,6 +156,66 @@ describe("OpenAIEmbeddingProvider", () => {
     expect(() => new OpenAIEmbeddingProvider("test-key")).toThrow(
       /OPENAI_EMBEDDING_DIMENSIONS must be a positive integer/,
     );
+  });
+
+  it("retries transient embedding failures against the automatic MuskAPI SLB fallback", async () => {
+    process.env["OPENAI_BASE_URL"] = "https://api.muskapi.cc";
+    process.env["OPENAI_EMBEDDING_MODEL"] = "text-embedding-v4";
+    process.env["OPENAI_EMBEDDING_DIMENSIONS"] = "3";
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        if (urls.length === 1) {
+          return new Response("bad gateway", { status: 502 });
+        }
+        return new Response(
+          JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIEmbeddingProvider("test-key");
+    const [embedding] = await provider.embedBatch(["hello"]);
+
+    expect(Array.from(embedding)).toEqual([
+      expect.closeTo(0.1),
+      expect.closeTo(0.2),
+      expect.closeTo(0.3),
+    ]);
+    expect(urls).toEqual([
+      "https://api.muskapi.cc/v1/embeddings",
+      "https://api-slb.muskapi.cc/v1/embeddings",
+    ]);
+  });
+
+  it("uses OPENAI_EMBEDDING_FALLBACK_BASE_URL before the generic fallback", async () => {
+    process.env["OPENAI_BASE_URL"] = "https://primary.example.com";
+    process.env["OPENAI_FALLBACK_BASE_URL"] = "https://generic.example.com";
+    process.env["OPENAI_EMBEDDING_FALLBACK_BASE_URL"] =
+      "https://embed-backup.example.com/v1";
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        if (urls.length === 1) {
+          return new Response("rate limited", { status: 429 });
+        }
+        return new Response(
+          JSON.stringify({ data: [{ embedding: [0.4, 0.5, 0.6] }] }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIEmbeddingProvider("test-key");
+    await provider.embed("hello");
+
+    expect(urls).toEqual([
+      "https://primary.example.com/v1/embeddings",
+      "https://embed-backup.example.com/v1/embeddings",
+    ]);
   });
 });
 

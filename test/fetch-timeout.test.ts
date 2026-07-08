@@ -347,6 +347,7 @@ describe("OpenAIProvider thinking-model fallback (#627)", () => {
 describe("OpenAIProvider Responses API transport", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    delete process.env["OPENAI_FALLBACK_BASE_URL"];
   });
 
   it("uses /v1/responses with instructions, input, and max_output_tokens", async () => {
@@ -472,5 +473,88 @@ describe("OpenAIProvider Responses API transport", () => {
       "https://proxy.example.com/v1/responses",
       "https://proxy.example.com/v1/chat/completions",
     ]);
+  });
+
+  it("retries transient failures against the automatic MuskAPI SLB fallback", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        if (urls.length === 1) {
+          return new Response("bad gateway", { status: 502 });
+        }
+        return new Response(JSON.stringify({ output_text: "slb ok" }), {
+          status: 200,
+        });
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "gpt-compatible",
+      1024,
+      "https://api.muskapi.cc",
+    );
+
+    await expect(provider.compress("system", "user")).resolves.toBe("slb ok");
+    expect(urls).toEqual([
+      "https://api.muskapi.cc/v1/responses",
+      "https://api-slb.muskapi.cc/v1/responses",
+    ]);
+  });
+
+  it("uses an explicit OpenAI fallback base URL when configured", async () => {
+    process.env["OPENAI_FALLBACK_BASE_URL"] = "https://backup.example.com/v1";
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        if (urls.length === 1) {
+          return new Response("upstream unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify({ output_text: "backup ok" }), {
+          status: 200,
+        });
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "gpt-compatible",
+      1024,
+      "https://proxy.example.com",
+    );
+
+    await expect(provider.summarize("system", "user")).resolves.toBe(
+      "backup ok",
+    );
+    expect(urls).toEqual([
+      "https://proxy.example.com/v1/responses",
+      "https://backup.example.com/v1/responses",
+    ]);
+  });
+
+  it("does not retry non-transient request errors against the fallback base", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        return new Response(JSON.stringify({ error: "unknown model" }), {
+          status: 400,
+        });
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "missing-model",
+      1024,
+      "https://api.muskapi.cc",
+    );
+
+    await expect(provider.compress("system", "user")).rejects.toThrow(
+      /OpenAI API error \(400\)/,
+    );
+    expect(urls).toEqual(["https://api.muskapi.cc/v1/responses"]);
   });
 });

@@ -7,6 +7,7 @@ import {
   detectAzure,
   formatHttpErrorBody,
   normalizeBaseUrl,
+  resolveAlternateBaseUrl,
 } from "../src/providers/_openai-shared.js";
 import { OpenAIEmbeddingProvider } from "../src/providers/embedding/openai.js";
 
@@ -261,6 +262,33 @@ describe("_openai-shared — normalizeBaseUrl", () => {
     expect(normalizeBaseUrl("https://api.deepseek.com/v1")).toBe(
       "https://api.deepseek.com/v1",
     );
+  });
+});
+
+describe("_openai-shared — resolveAlternateBaseUrl", () => {
+  it("automatically maps api.muskapi.cc to the SLB endpoint", () => {
+    expect(resolveAlternateBaseUrl("https://api.muskapi.cc")).toBe(
+      "https://api-slb.muskapi.cc",
+    );
+    expect(resolveAlternateBaseUrl("https://api.muskapi.cc/v1")).toBe(
+      "https://api-slb.muskapi.cc/v1",
+    );
+  });
+
+  it("uses explicit fallback URLs for non-MuskAPI providers", () => {
+    expect(
+      resolveAlternateBaseUrl(
+        "https://proxy.example.com",
+        "https://proxy-backup.example.com/",
+      ),
+    ).toBe("https://proxy-backup.example.com");
+  });
+
+  it("does not invent a MuskAPI fallback for ordinary providers", () => {
+    expect(resolveAlternateBaseUrl("https://api.openai.com")).toBeNull();
+    expect(
+      resolveAlternateBaseUrl("https://api.openai.com", "https://api.openai.com"),
+    ).toBeNull();
   });
 });
 
