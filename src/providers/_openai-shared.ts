@@ -1,16 +1,14 @@
 // Shared transport helpers for the OpenAI-compatible LLM + embedding
-// providers. Both surfaces (chat completions, embeddings) speak the
-// same wire shape on the standard OpenAI path. Azure OpenAI ships
-// two URL styles and we support both:
+// providers. Azure OpenAI ships two URL styles and we support both:
 //
-//   - Legacy/stable: `/openai/deployments/<deployment>/chat/completions`
+//   - Legacy/stable: `/openai/deployments/<deployment>/<route>`
 //     with mandatory `api-version=<date>` query param. The deployment
 //     name lives in the URL path. Required api-version moves with
 //     every Azure date-stamped revision; we keep the
 //     `OPENAI_API_VERSION` env knob + `DEFAULT_AZURE_API_VERSION`
 //     fallback so existing configs don't break on upgrade.
 //
-//   - v1 (GA Apr-2025): `/openai/v1/chat/completions`. No
+//   - v1 (GA Apr-2025): `/openai/v1/<route>`. No
 //     api-version query param, no `/deployments/` segment. Deployment
 //     name is passed in the request body as `model`. This matches
 //     the OpenAI wire shape one-for-one which is the whole point of
@@ -23,6 +21,7 @@
 // OPENAI_BASE_URL (or never adding it). See azureStyleOf().
 
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com";
+const HTTP_ERROR_BODY_LIMIT = 500;
 
 // Default api-version for the legacy Azure URL pattern. Only used
 // when the configured base URL carries `/deployments/` AND
@@ -128,6 +127,19 @@ export function buildChatUrl(
   return appendOpenAIRoute(baseUrl, "/chat/completions");
 }
 
+export function buildResponseUrl(
+  baseUrl: string,
+  isAzure: boolean,
+  azureApiVersion: string,
+): string {
+  if (isAzure) {
+    return azureStyleOf(baseUrl) === "legacy"
+      ? legacyAzureUrl(baseUrl, "/responses", azureApiVersion)
+      : v1AzureUrl(baseUrl, "/responses");
+  }
+  return appendOpenAIRoute(baseUrl, "/responses");
+}
+
 export function buildEmbeddingUrl(
   baseUrl: string,
   isAzure: boolean,
@@ -163,4 +175,11 @@ export function buildAuthHeaders(
 
 export function normalizeBaseUrl(raw: string | undefined): string {
   return (raw || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
+}
+
+export function formatHttpErrorBody(raw: string): string {
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  if (!normalized) return "<empty response body>";
+  if (normalized.length <= HTTP_ERROR_BODY_LIMIT) return normalized;
+  return `${normalized.slice(0, HTTP_ERROR_BODY_LIMIT).trimEnd()}... [truncated ${normalized.length - HTTP_ERROR_BODY_LIMIT} chars]`;
 }

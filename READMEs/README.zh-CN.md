@@ -598,15 +598,15 @@ npm install && npm run build && npm start
 
 如果已经安装 `iii`,这会以本地 `iii-engine` 启动 agentmemory;如果 Docker 可用,则回退到 Docker Compose。REST、流和查看器默认绑定到 `127.0.0.1`。
 
-手动安装 `iii-engine`。**agentmemory 当前将 `iii-engine` 固定在 `v0.11.2`** — `v0.11.6` 引入了新的「通过 `iii worker add` 沙盒化一切」模型,agentmemory 尚未为此重构。重构落地后即解除固定。如果你已经手动迁移到沙盒模型,可用 `AGENTMEMORY_III_VERSION=<version>` 覆盖。
+手动安装 `iii-engine`。**agentmemory 当前将 `iii-engine` 固定在 `v0.11.3`** — `v0.11.6` 引入了新的「通过 `iii worker add` 沙盒化一切」模型,agentmemory 尚未为此重构。重构落地后即解除固定。如果你已经手动迁移到沙盒模型,可用 `AGENTMEMORY_III_VERSION=<version>` 覆盖。
 
-- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.2/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
+- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.3/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
 - **macOS x64:** 把 `aarch64-apple-darwin` 换成 `x86_64-apple-darwin`
 - **Linux x64:** 换成 `x86_64-unknown-linux-gnu`
 - **Linux arm64:** 换成 `aarch64-unknown-linux-gnu`
-- **Windows:** 从 [iii-hq/iii releases v0.11.2](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2) 下载 `iii-x86_64-pc-windows-msvc.zip`,提取 `iii.exe`,加入 PATH
+- **Windows:** 从 [iii-hq/iii releases v0.11.3](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3) 下载 `iii-x86_64-pc-windows-msvc.zip`,提取 `iii.exe`,加入 PATH
 
-或使用 Docker(捆绑的 `docker-compose.yml` 会拉取 `iiidev/iii:0.11.2`)。完整文档:[iii.dev/docs](https://iii.dev/docs)。
+或使用 Docker(捆绑的 `docker-compose.yml` 会拉取 `iiidev/iii:0.11.3`)。完整文档:[iii.dev/docs](https://iii.dev/docs)。
 
 ### Windows
 
@@ -615,8 +615,8 @@ agentmemory 可在 Windows 10/11 运行,但仅 Node.js 包不够 — 你还需�
 **选项 A — 预构建 Windows 二进制(推荐):**
 
 ```powershell
-# 1. 在浏览器打开 https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2
-#    (我们固定在 v0.11.2,直到 agentmemory 为 v0.11.6+ 引擎要求的
+# 1. 在浏览器打开 https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3
+#    (我们固定在 v0.11.3,直到 agentmemory 为 v0.11.6+ 引擎要求的
 #     新沙盒模型完成重构)
 # 2. 下载 iii-x86_64-pc-windows-msvc.zip
 #    (如果是 ARM 机器则下载 iii-aarch64-pc-windows-msvc.zip)
@@ -625,7 +625,7 @@ agentmemory 可在 Windows 10/11 运行,但仅 Node.js 包不够 — 你还需�
 #    (agentmemory 会自动检查该位置)
 # 4. 验证:
 iii --version
-# 应输出:0.11.2
+# 应输出:0.11.3
 
 # 5. 然后照常运行 agentmemory:
 npx -y @agentmemory/agentmemory

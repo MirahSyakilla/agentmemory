@@ -2,6 +2,7 @@ import type { CompressedObservation } from "../types.js";
 import { stem } from "./stemmer.js";
 import { getSynonyms } from "./synonyms.js";
 import { segmentCjk, hasCjk } from "./cjk-segmenter.js";
+import type { LexicalStore } from "./lexical-store.js";
 
 interface IndexEntry {
   obsId: string;
@@ -9,17 +10,30 @@ interface IndexEntry {
   termCount: number;
 }
 
-export class SearchIndex {
+export class SearchIndex implements LexicalStore {
+  readonly backend: string = "memory";
   private entries: Map<string, IndexEntry> = new Map();
   private invertedIndex: Map<string, Set<string>> = new Map();
   private docTermCounts: Map<string, Map<string, number>> = new Map();
   private totalDocLength = 0;
   private sortedTerms: string[] | null = null;
+  private readonly maxEntries: number;
 
   private readonly k1 = 1.2;
   private readonly b = 0.75;
 
+  constructor(maxEntries = Number.POSITIVE_INFINITY) {
+    this.maxEntries =
+      Number.isFinite(maxEntries) && maxEntries > 0
+        ? Math.floor(maxEntries)
+        : Number.POSITIVE_INFINITY;
+  }
+
   add(obs: CompressedObservation): void {
+    if (this.entries.has(obs.id)) {
+      this.remove(obs.id);
+    }
+
     const terms = this.extractTerms(obs);
     const termFreq = new Map<string, number>();
     let termCount = 0;
@@ -45,6 +59,12 @@ export class SearchIndex {
     }
 
     this.sortedTerms = null;
+
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (!oldest) break;
+      this.remove(oldest);
+    }
   }
 
   has(id: string): boolean {
@@ -163,6 +183,10 @@ export class SearchIndex {
     return this.entries.size;
   }
 
+  get capacity(): number {
+    return this.maxEntries;
+  }
+
   clear(): void {
     this.entries.clear();
     this.invertedIndex.clear();
@@ -172,22 +196,28 @@ export class SearchIndex {
   }
 
   restoreFrom(other: SearchIndex): void {
-    this.entries = new Map(
-      Array.from(other.entries.entries()).map(([k, v]) => [k, { ...v }]),
-    );
-    this.invertedIndex = new Map(
-      Array.from(other.invertedIndex.entries()).map(([k, v]) => [
-        k,
-        new Set(v),
-      ]),
-    );
-    this.docTermCounts = new Map(
-      Array.from(other.docTermCounts.entries()).map(([k, v]) => [
-        k,
-        new Map(v),
-      ]),
-    );
-    this.totalDocLength = other.totalDocLength;
+    this.clear();
+    const srcEntries = (other as any).entries as Map<string, IndexEntry>;
+    const srcTerms = (other as any).docTermCounts as Map<string, Map<string, number>>;
+    for (const [obsId] of srcEntries) {
+      const entry = srcEntries.get(obsId);
+      const termFreq = srcTerms.get(obsId);
+      if (!entry || !termFreq) continue;
+      this.entries.set(obsId, { ...entry });
+      this.docTermCounts.set(obsId, new Map(termFreq));
+      this.totalDocLength += entry.termCount;
+      for (const term of termFreq.keys()) {
+        if (!this.invertedIndex.has(term)) {
+          this.invertedIndex.set(term, new Set());
+        }
+        this.invertedIndex.get(term)!.add(obsId);
+      }
+      while (this.entries.size > this.maxEntries) {
+        const oldest = this.entries.keys().next().value;
+        if (!oldest) break;
+        this.remove(oldest);
+      }
+    }
     this.sortedTerms = null;
   }
 
@@ -209,9 +239,9 @@ export class SearchIndex {
     });
   }
 
-  static deserialize(json: string): SearchIndex {
+  static deserialize(json: string, maxEntries?: number): SearchIndex {
     try {
-      const idx = new SearchIndex();
+      const idx = new SearchIndex(maxEntries);
       const data = JSON.parse(json);
       if (!data?.entries || !data?.inverted || !data?.docTerms) return idx;
       for (const [key, val] of data.entries) {
@@ -226,9 +256,14 @@ export class SearchIndex {
       const rawLen = Number(data.totalDocLength);
       idx.totalDocLength =
         Number.isFinite(rawLen) && rawLen >= 0 ? Math.floor(rawLen) : 0;
+      while (idx.entries.size > idx.maxEntries) {
+        const oldest = idx.entries.keys().next().value;
+        if (!oldest) break;
+        idx.remove(oldest);
+      }
       return idx;
     } catch {
-      return new SearchIndex();
+      return new SearchIndex(maxEntries);
     }
   }
 

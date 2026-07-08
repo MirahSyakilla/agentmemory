@@ -34,12 +34,32 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
+type VectorEntry = {
+  embedding: Float32Array;
+  sessionId: string;
+};
+
 export class VectorIndex {
-  private vectors: Map<string, { embedding: Float32Array; sessionId: string }> =
-    new Map();
+  private vectors: Map<string, VectorEntry> = new Map();
+  private readonly maxEntries: number;
+
+  constructor(maxEntries = Number.POSITIVE_INFINITY) {
+    this.maxEntries =
+      Number.isFinite(maxEntries) && maxEntries > 0
+        ? Math.floor(maxEntries)
+        : Number.POSITIVE_INFINITY;
+  }
 
   add(obsId: string, sessionId: string, embedding: Float32Array): void {
+    if (this.vectors.has(obsId)) {
+      this.vectors.delete(obsId);
+    }
     this.vectors.set(obsId, { embedding, sessionId });
+    while (this.vectors.size > this.maxEntries) {
+      const oldest = this.vectors.keys().next().value;
+      if (!oldest) break;
+      this.vectors.delete(oldest);
+    }
   }
 
   remove(obsId: string): void {
@@ -110,14 +130,11 @@ export class VectorIndex {
   restoreFrom(other: VectorIndex): void {
     const src = (other as any).vectors as Map<
       string,
-      { embedding: Float32Array; sessionId: string }
+      VectorEntry
     >;
     this.vectors = new Map();
     for (const [obsId, entry] of src) {
-      this.vectors.set(obsId, {
-        embedding: new Float32Array(entry.embedding),
-        sessionId: entry.sessionId,
-      });
+      this.add(obsId, entry.sessionId, new Float32Array(entry.embedding));
     }
   }
 
@@ -135,8 +152,8 @@ export class VectorIndex {
     return JSON.stringify(data);
   }
 
-  static deserialize(json: string): VectorIndex {
-    const idx = new VectorIndex();
+  static deserialize(json: string, maxEntries?: number): VectorIndex {
+    const idx = new VectorIndex(maxEntries);
     let data: unknown;
     try {
       data = JSON.parse(json);

@@ -67,13 +67,13 @@ workers:
           file_path: /data/stream_store
   - name: iii-observability
     config:
-      enabled: true
+      enabled: ${AGENTMEMORY_OBSERVABILITY_ENABLED:-false}
       service_name: agentmemory
-      exporter: memory
-      sampling_ratio: 1.0
-      metrics_enabled: true
-      logs_enabled: true
-      logs_console_output: true
+      exporter: ${AGENTMEMORY_OBSERVABILITY_EXPORTER:-memory}
+      sampling_ratio: ${AGENTMEMORY_OBSERVABILITY_SAMPLING_RATIO:-0.0}
+      metrics_enabled: ${AGENTMEMORY_OBSERVABILITY_METRICS_ENABLED:-false}
+      logs_enabled: ${AGENTMEMORY_OBSERVABILITY_LOGS_ENABLED:-false}
+      logs_console_output: ${AGENTMEMORY_OBSERVABILITY_LOGS_CONSOLE_OUTPUT:-false}
 EOF
 chown "$RUN_AS" "$III_CONFIG"
 

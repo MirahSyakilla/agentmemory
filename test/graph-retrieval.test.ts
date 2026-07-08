@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { GraphRetrieval } from "../src/functions/graph-retrieval.js";
-import type { GraphNode, GraphEdge } from "../src/types.js";
+import type { GraphNode, GraphEdge, CompressedObservation, Session } from "../src/types.js";
 
 function mockKV(
   nodes: GraphNode[] = [],
   edges: GraphEdge[] = [],
+  observations: CompressedObservation[] = [],
+  sessions: Session[] = [],
 ) {
   const store = new Map<string, Map<string, unknown>>();
   const nodesMap = new Map<string, unknown>();
@@ -14,6 +16,18 @@ function mockKV(
   const edgesMap = new Map<string, unknown>();
   for (const e of edges) edgesMap.set(e.id, e);
   store.set("mem:graph:edges", edgesMap);
+
+  if (sessions.length > 0) {
+    const sessionsMap = new Map<string, unknown>();
+    for (const s of sessions) sessionsMap.set(s.id, s);
+    store.set("mem:sessions", sessionsMap);
+  }
+  for (const obs of observations) {
+    if (!store.has(`mem:obs:${obs.sessionId}`)) {
+      store.set(`mem:obs:${obs.sessionId}`, new Map());
+    }
+    store.get(`mem:obs:${obs.sessionId}`)!.set(obs.id, obs);
+  }
 
   return {
     get: async <T>(scope: string, key: string): Promise<T | null> => {
@@ -82,6 +96,39 @@ describe("GraphRetrieval", () => {
     const results = await retrieval.searchByEntities(["React"]);
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].obsId).toBe("obs_1");
+  });
+
+  it("resolves sessionId for legacy graph nodes by scanning observations (#925)", async () => {
+    const nodes = [makeNode("n1", "React", "library", ["obs_1"])];
+    const sessions: Session[] = [
+      {
+        id: "ses_1",
+        project: "demo",
+        cwd: "/repo",
+        startedAt: new Date().toISOString(),
+        status: "completed",
+        observationCount: 1,
+      },
+    ];
+    const observations: CompressedObservation[] = [
+      {
+        id: "obs_1",
+        sessionId: "ses_1",
+        timestamp: new Date().toISOString(),
+        type: "file_edit",
+        title: "React edit",
+        facts: [],
+        narrative: "Touched React code",
+        concepts: ["react"],
+        files: ["src/app.tsx"],
+        importance: 5,
+      },
+    ];
+    const kv = mockKV(nodes, [], observations, sessions);
+    const retrieval = new GraphRetrieval(kv as never);
+
+    const results = await retrieval.searchByEntities(["React"]);
+    expect(results[0].sessionId).toBe("ses_1");
   });
 
   it("finds entities by partial name match", async () => {

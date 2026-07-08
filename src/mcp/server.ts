@@ -11,6 +11,7 @@ import type {
 import { getVisibleTools } from "./tools-registry.js";
 import { timingSafeCompare } from "../auth.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { logger } from "../logger.js";
 
 type McpResponse = {
   status_code: number;
@@ -478,14 +479,43 @@ export function registerMcpEndpoints(
 
           case "memory_consolidate": {
             try {
-              const result = await sdk.trigger({ function_id: "mem::consolidate-pipeline", payload: {
-                tier: args.tier as string,
-              } });
+              const tier =
+                typeof args.tier === "string" && args.tier.trim()
+                  ? args.tier.trim()
+                  : undefined;
+              const payload = tier ? { tier } : {};
+              const pending = Symbol("consolidate-pending");
+              const run = sdk
+                .trigger({
+                  function_id: "mem::consolidate-pipeline",
+                  payload,
+                })
+                .catch((err) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  logger.warn("MCP consolidation failed", { tier, error: msg });
+                  return { success: false, error: msg };
+                });
+              const result = await Promise.race([
+                run,
+                new Promise<typeof pending>((resolve) =>
+                  setTimeout(() => resolve(pending), 12_000),
+                ),
+              ]);
+              const body =
+                result === pending
+                  ? {
+                      success: true,
+                      running: true,
+                      tier: tier || "all",
+                      message:
+                        "Consolidation is still running in the background; check memory_sessions, semantic/procedural lists, or diagnostics shortly.",
+                    }
+                  : result;
               return {
                 status_code: 200,
                 body: {
                   content: [
-                    { type: "text", text: JSON.stringify(result, null, 2) },
+                    { type: "text", text: JSON.stringify(body, null, 2) },
                   ],
                 },
               };

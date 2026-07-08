@@ -4,7 +4,7 @@ import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { deleteAccessLog } from "./access-tracker.js";
-import { getSearchIndex, vectorIndexRemove, flushIndexSave } from "./search.js";
+import { lexicalIndexRemove, vectorIndexRemove, flushIndexSave } from "./search.js";
 import { logger } from "../logger.js";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -54,8 +54,8 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
                 timestamp: mem.forgetAfter,
               });
               await deleteAccessLog(kv, mem.id);
-              getSearchIndex().remove(mem.id);
-              vectorIndexRemove(mem.id);
+              await lexicalIndexRemove(mem.id);
+              await vectorIndexRemove(mem.id);
             }
           }
         }
@@ -182,8 +182,8 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
                   sessionId: sessions[i].id,
                   timestamp: obs.timestamp,
                 });
-                getSearchIndex().remove(obs.id);
-                vectorIndexRemove(obs.id);
+                await lexicalIndexRemove(obs.id);
+                await vectorIndexRemove(obs.id);
               }
             }
           }

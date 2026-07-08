@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { getEnvVar } from "../config.js";
 
 const cjkRequire = createRequire(import.meta.url);
 
@@ -39,7 +40,13 @@ interface JiebaInstance {
 let jiebaInstance: JiebaInstance | null = null;
 let jiebaLoaded = false;
 
+const NATIVE_JIEBA_ENABLED = (() => {
+  const raw = getEnvVar("AGENTMEMORY_NATIVE_CJK_SEGMENTER") || "";
+  return raw === "true" || raw === "1";
+})();
+
 function getJieba(): JiebaInstance | null {
+  if (!NATIVE_JIEBA_ENABLED) return null;
   if (jiebaLoaded) return jiebaInstance;
   jiebaLoaded = true;
   try {

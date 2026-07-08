@@ -135,6 +135,23 @@ function parseOptionalPositiveInt(value: unknown): number | undefined | null {
   return parsed;
 }
 
+export function sortObservationsNewestFirst<T extends { id?: string; timestamp?: string }>(
+  observations: T[],
+): T[] {
+  return observations.sort((a, b) => {
+    const aMs = Date.parse(a.timestamp ?? "");
+    const bMs = Date.parse(b.timestamp ?? "");
+    const aValid = Number.isFinite(aMs);
+    const bValid = Number.isFinite(bMs);
+    if (aValid && bValid && aMs !== bMs) return bMs - aMs;
+    if (aValid !== bValid) return bValid ? 1 : -1;
+
+    const timestampOrder = (b.timestamp ?? "").localeCompare(a.timestamp ?? "");
+    if (timestampOrder !== 0) return timestampOrder;
+    return (b.id ?? "").localeCompare(a.id ?? "");
+  });
+}
+
 export function registerApiTriggers(
   sdk: ISdk,
   kv: StateKV,
@@ -309,6 +326,19 @@ export function registerApiTriggers(
         data: body.data,
       };
       const result = await sdk.trigger({ function_id: "mem::observe", payload });
+      if (
+        result &&
+        typeof result === "object" &&
+        (result as { success?: unknown }).success === false
+      ) {
+        const error = (result as { error?: unknown }).error;
+        const status =
+          typeof error === "string" &&
+          error.toLowerCase().includes("limit reached")
+            ? 429
+            : 400;
+        return { status_code: status, body: result };
+      }
       return { status_code: 201, body: result };
     },
   );
@@ -864,7 +894,42 @@ export function registerApiTriggers(
       const filtered = filterAgentId
         ? observations.filter((o) => o.agentId === filterAgentId)
         : observations;
-      return { status_code: 200, body: { observations: filtered } };
+      sortObservationsNewestFirst(filtered);
+      const rawLimit = req.query_params?.["limit"];
+      const rawOffset = req.query_params?.["offset"];
+      const parsedLimit =
+        typeof rawLimit === "string" ? Number(rawLimit) : Number.NaN;
+      const parsedOffset =
+        typeof rawOffset === "string" ? Number(rawOffset) : Number.NaN;
+      const limit =
+        Number.isInteger(parsedLimit) && parsedLimit > 0
+          ? Math.min(parsedLimit, 5000)
+          : 500;
+      const offset =
+        Number.isInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+      if (req.query_params?.["count"] === "true") {
+        return {
+          status_code: 200,
+          body: {
+            observations: [],
+            total: filtered.length,
+            offset: 0,
+            limit: 0,
+            hasMore: filtered.length > 0,
+          },
+        };
+      }
+      const sliced = filtered.slice(offset, offset + limit);
+      return {
+        status_code: 200,
+        body: {
+          observations: sliced,
+          total: filtered.length,
+          offset,
+          limit,
+          hasMore: offset + sliced.length < filtered.length,
+        },
+      };
     },
   );
   sdk.registerTrigger({
@@ -1235,13 +1300,21 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const project = req.query_params["project"] as string;
+      const refreshRaw = req.query_params["refresh"] as string | undefined;
       if (!project) {
         return {
           status_code: 400,
           body: { error: "project query param is required" },
         };
       }
-      const result = await sdk.trigger({ function_id: "mem::profile", payload: { project } });
+      const refresh =
+        refreshRaw === "1" ||
+        refreshRaw === "true" ||
+        refreshRaw === "yes";
+      const result = await sdk.trigger({
+        function_id: "mem::profile",
+        payload: { project, refresh },
+      });
       return { status_code: 200, body: result };
     },
   );
@@ -1845,6 +1918,11 @@ export function registerApiTriggers(
         normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
       const includeOrphans =
         req.query_params?.["includeOrphans"] === "true";
+      const project =
+        typeof req.query_params?.["project"] === "string" &&
+        req.query_params["project"].trim().length > 0
+          ? req.query_params["project"].trim()
+          : undefined;
       const filterAgentId = wildcardAgent
         ? undefined
         : explicitAgentId ?? (isAgentScopeIsolated() ? getAgentId() : undefined);
@@ -1855,6 +1933,9 @@ export function registerApiTriggers(
             m.agentId === filterAgentId ||
             (includeOrphans && m.agentId === undefined),
         );
+      }
+      if (project) {
+        filtered = filtered.filter((m) => m.project === project);
       }
 
       // viewer + `agentmemory status` were hitting this endpoint to

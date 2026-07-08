@@ -29,6 +29,7 @@ import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { VERSION } from "../version.js";
 import { recordAudit } from "./audit.js";
+import { rebuildIndex } from "./search.js";
 import { logger } from "../logger.js";
 
 export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
@@ -581,6 +582,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         strategy,
         stats,
       });
+      await rebuildIndex(kv);
       return { success: true, strategy, ...stats };
     },
   );

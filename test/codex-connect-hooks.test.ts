@@ -90,6 +90,31 @@ describe("buildMergedHooks", () => {
     }
   });
 
+  it("re-install strips agentmemory hooks from an older install path", () => {
+    const existing: HookManifest = {
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command:
+                  'node "/home/meow/.nvm/versions/node/v20.20.0/lib/node_modules/@agentmemory/agentmemory/plugin/scripts/session-start.mjs"',
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const merged = buildMergedHooks(existing, PLUGIN_ROOT);
+    const commands = merged.hooks["SessionStart"]!.flatMap((entry) =>
+      entry.hooks.map((handler) => handler.command),
+    );
+    expect(commands.some((command) => command.includes("node/v20.20.0"))).toBe(false);
+    expect(commands.filter((command) => command.includes("session-start.mjs"))).toHaveLength(1);
+    expect(commands[0]).toContain(`${PLUGIN_ROOT}/scripts/session-start.mjs`);
+  });
+
   it("re-install preserves unrelated user entries", () => {
     const userEntry = {
       hooks: [{ type: "command", command: "echo user-untouchable" }],

@@ -16,6 +16,12 @@ function safeParseInt(value: string | undefined, fallback: number): number {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function expandHomePath(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  return value;
+}
+
 const DATA_DIR = join(homedir(), ".agentmemory");
 const ENV_FILE = join(DATA_DIR, ".env");
 
@@ -202,6 +208,214 @@ export function isDropStaleIndexEnabled(): boolean {
   return getMergedEnv()["AGENTMEMORY_DROP_STALE_INDEX"] === "true";
 }
 
+export function isOtelEnabled(): boolean {
+  const env = getMergedEnv();
+  const raw =
+    env["AGENTMEMORY_OTEL_ENABLED"] ??
+    env["AGENTMEMORY_OBSERVABILITY_ENABLED"];
+  const value = raw?.trim().toLowerCase();
+  return value === "true" || value === "1";
+}
+
+export function getHealthMemoryRssFloorMb(): number {
+  const raw = getEnvVar("AGENTMEMORY_MEMORY_RSS_FLOOR_MB");
+  if (!raw) return 512;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 512;
+}
+
+export function getHealthMemoryRssFloorBytes(): number {
+  return getHealthMemoryRssFloorMb() * 1024 * 1024;
+}
+
+export function getVectorIndexMaxItems(): number {
+  const raw = getEnvVar("AGENTMEMORY_VECTOR_INDEX_MAX_ITEMS");
+  if (!raw) return 12_000;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 12_000;
+}
+
+export function getSearchIndexMaxItems(): number {
+  const raw = getEnvVar("AGENTMEMORY_SEARCH_INDEX_MAX_ITEMS");
+  if (!raw) return 20_000;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 20_000;
+}
+
+export function getRebuildIndexMaxItems(): number {
+  const raw = getEnvVar("AGENTMEMORY_REBUILD_INDEX_MAX_ITEMS");
+  if (!raw) return getSearchIndexMaxItems();
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : getSearchIndexMaxItems();
+}
+
+export type VectorBackend = "memory" | "qdrant";
+
+export interface QdrantVectorConfig {
+  url: string;
+  collection: string;
+  apiKey?: string;
+}
+
+export type LexicalBackend = "memory" | "tantivy";
+
+export interface TantivyConfig {
+  path: string;
+  heapSizeBytes: number;
+  numThreads: number;
+}
+
+export type MetadataBackend = "iii-kv" | "postgres";
+
+export interface PostgresConfig {
+  connectionString?: string;
+  host?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  password?: string;
+  ssl: boolean;
+}
+
+export type GraphBackend = "iii-kv" | "neo4j";
+
+export interface Neo4jConfig {
+  url: string;
+  user?: string;
+  password?: string;
+  database?: string;
+}
+
+export type BlobBackend = "inline" | "filesystem";
+
+export interface BlobStoreConfig {
+  rootDir: string;
+}
+
+function warnIgnoredBackendOverride(
+  key: string,
+  value: string | undefined,
+  required: string,
+): void {
+  const raw = value?.trim();
+  if (!raw || raw.toLowerCase() === required) return;
+  process.stderr.write(
+    `[agentmemory] ${key}=${raw} is ignored; ${required} is the mandatory backend.\n`,
+  );
+}
+
+export function getVectorBackend(): VectorBackend {
+  const raw = getEnvVar("AGENTMEMORY_VECTOR_BACKEND")
+    ?.trim()
+    .toLowerCase();
+  warnIgnoredBackendOverride("AGENTMEMORY_VECTOR_BACKEND", raw, "qdrant");
+  return "qdrant";
+}
+
+export function loadQdrantVectorConfig(): QdrantVectorConfig {
+  const env = getMergedEnv();
+  const apiKey = env["AGENTMEMORY_QDRANT_API_KEY"]?.trim();
+  return {
+    url: env["AGENTMEMORY_QDRANT_URL"] || "http://127.0.0.1:6333",
+    collection:
+      env["AGENTMEMORY_QDRANT_COLLECTION"] || "agentmemory_vectors",
+    ...(apiKey ? { apiKey } : {}),
+  };
+}
+
+export function getLexicalBackend(): LexicalBackend {
+  const raw = getEnvVar("AGENTMEMORY_LEXICAL_BACKEND")
+    ?.trim()
+    .toLowerCase();
+  warnIgnoredBackendOverride("AGENTMEMORY_LEXICAL_BACKEND", raw, "tantivy");
+  return "tantivy";
+}
+
+export function loadTantivyConfig(): TantivyConfig {
+  const env = getMergedEnv();
+  const heapSizeMb = safeParseInt(env["AGENTMEMORY_TANTIVY_HEAP_MB"], 64);
+  const numThreads = Math.max(0, safeParseInt(env["AGENTMEMORY_TANTIVY_THREADS"], 0));
+  const effectiveThreads = numThreads > 0 ? numThreads : 1;
+  return {
+    path: expandHomePath(
+      env["AGENTMEMORY_TANTIVY_PATH"] || join(DATA_DIR, "tantivy"),
+    ),
+    heapSizeBytes: Math.max(
+      15_000_000 * effectiveThreads,
+      heapSizeMb * 1024 * 1024,
+    ),
+    numThreads,
+  };
+}
+
+export function getMetadataBackend(): MetadataBackend {
+  const raw = getEnvVar("AGENTMEMORY_METADATA_BACKEND")
+    ?.trim()
+    .toLowerCase();
+  warnIgnoredBackendOverride("AGENTMEMORY_METADATA_BACKEND", raw, "postgres");
+  return "postgres";
+}
+
+export function loadPostgresConfig(): PostgresConfig {
+  const env = getMergedEnv();
+  const connectionString =
+    env["AGENTMEMORY_PG_URL"] || env["DATABASE_URL"] || undefined;
+  const sslRaw = env["AGENTMEMORY_PG_SSL"]?.trim().toLowerCase();
+  return {
+    ...(connectionString ? { connectionString } : {}),
+    ...(connectionString
+      ? {}
+      : {
+          host: env["AGENTMEMORY_PG_HOST"] || "127.0.0.1",
+          port: safeParseInt(env["AGENTMEMORY_PG_PORT"], 5432),
+          database: env["AGENTMEMORY_PG_DATABASE"] || "agentmemory",
+          user: env["AGENTMEMORY_PG_USER"] || "agentmemory",
+          password: env["AGENTMEMORY_PG_PASSWORD"] || "agentmemory",
+        }),
+    ssl: sslRaw === "true" || sslRaw === "1",
+  };
+}
+
+export function getGraphBackend(): GraphBackend {
+  const raw = getEnvVar("AGENTMEMORY_GRAPH_BACKEND")
+    ?.trim()
+    .toLowerCase();
+  warnIgnoredBackendOverride("AGENTMEMORY_GRAPH_BACKEND", raw, "neo4j");
+  return "neo4j";
+}
+
+export function loadNeo4jConfig(): Neo4jConfig {
+  const env = getMergedEnv();
+  return {
+    url: env["AGENTMEMORY_NEO4J_URL"] || "neo4j://127.0.0.1:7687",
+    user: env["AGENTMEMORY_NEO4J_USER"] || env["NEO4J_USERNAME"] || "neo4j",
+    password:
+      env["AGENTMEMORY_NEO4J_PASSWORD"] ||
+      env["NEO4J_PASSWORD"] ||
+      "agentmemory",
+    database: env["AGENTMEMORY_NEO4J_DATABASE"] || env["NEO4J_DATABASE"],
+  };
+}
+
+export function getBlobBackend(): BlobBackend {
+  const raw = getEnvVar("AGENTMEMORY_BLOB_BACKEND")
+    ?.trim()
+    .toLowerCase();
+  warnIgnoredBackendOverride("AGENTMEMORY_BLOB_BACKEND", raw, "filesystem");
+  return "filesystem";
+}
+
+export function loadBlobStoreConfig(): BlobStoreConfig {
+  const env = getMergedEnv();
+  return {
+    rootDir: expandHomePath(
+      env["AGENTMEMORY_BLOB_ROOT"] || join(DATA_DIR, "blobs"),
+    ),
+  };
+}
+
 export function detectLlmProviderKind(): "llm" | "noop" {
   const env = getMergedEnv();
   if (
@@ -330,6 +544,12 @@ export function loadSnapshotConfig(): {
 
 export function isGraphExtractionEnabled(): boolean {
   return getMergedEnv()["GRAPH_EXTRACTION_ENABLED"] === "true";
+}
+
+export function isSmartSearchGraphEnabled(): boolean {
+  const raw = getMergedEnv()["AGENTMEMORY_SMART_SEARCH_GRAPH"];
+  if (raw === "false" || raw === "0") return false;
+  return true;
 }
 
 export function getGraphBatchSize(): number {

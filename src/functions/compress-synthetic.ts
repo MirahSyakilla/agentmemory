@@ -42,21 +42,148 @@ function inferType(
 }
 
 function extractFiles(input: unknown): string[] {
-  if (!input || typeof input !== "object") return [];
-  const o = input as Record<string, unknown>;
   const out = new Set<string>();
-  for (const key of [
-    "file_path",
-    "filepath",
-    "path",
-    "filePath",
-    "file",
-    "pattern",
-  ]) {
-    const v = o[key];
-    if (typeof v === "string" && v.length > 0 && v.length < 512) out.add(v);
+
+  function addCandidate(value: string): void {
+    const trimmed = value.trim().replace(/[),.;:'"`\]}]+$/g, "");
+    if (
+      trimmed.length > 0 &&
+      trimmed.length < 512 &&
+      !trimmed.startsWith("http") &&
+      !trimmed.startsWith("data:")
+    ) {
+      out.add(trimmed);
+    }
   }
+
+  function scanString(value: string): void {
+    const patchRe = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm;
+    let patchMatch: RegExpExecArray | null;
+    while ((patchMatch = patchRe.exec(value)) !== null) {
+      addCandidate(patchMatch[1]);
+    }
+
+    const pathRe =
+      /(?:^|[\s"'`(=:{])((?:\.{1,2}\/|\/)[A-Za-z0-9_@%+=:,./-]{1,240}|[A-Za-z0-9_@%+=:.-]+(?:\/[A-Za-z0-9_@%+=:.-]+)+\.[A-Za-z0-9]{1,12})(?=$|[\s"'`),};\]])/g;
+    let match: RegExpExecArray | null;
+    while ((match = pathRe.exec(value)) !== null) {
+      addCandidate(match[1]);
+    }
+  }
+
+  function visit(value: unknown, depth: number): void {
+    if (depth > 3 || value == null) return;
+    if (typeof value === "string") {
+      scanString(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 50)) visit(item, depth + 1);
+      return;
+    }
+    if (typeof value !== "object") return;
+
+    const o = value as Record<string, unknown>;
+    for (const key of [
+      "file_path",
+      "filepath",
+      "path",
+      "filePath",
+      "file",
+      "pattern",
+      "cmd",
+      "command",
+      "workdir",
+    ]) {
+      const v = o[key];
+      if (typeof v === "string") {
+        if (
+          [
+            "file_path",
+            "filepath",
+            "path",
+            "filePath",
+            "file",
+            "pattern",
+            "workdir",
+          ].includes(key)
+        ) {
+          addCandidate(v);
+        }
+        scanString(v);
+      }
+    }
+    for (const value of Object.values(o).slice(0, 50)) {
+      visit(value, depth + 1);
+    }
+  }
+
+  visit(input, 0);
   return [...out];
+}
+
+const STOP_CONCEPTS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "that",
+  "this",
+  "your",
+  "you",
+  "are",
+  "was",
+  "were",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "could",
+  "should",
+  "into",
+  "then",
+  "than",
+  "there",
+  "here",
+  "function",
+  "command",
+  "output",
+  "input",
+  "call",
+  "tool",
+  "json",
+  "true",
+  "false",
+  "null",
+]);
+
+function extractConcepts(text: string, files: string[]): string[] {
+  const out = new Set<string>();
+  const add = (token: string) => {
+    const t = token.toLowerCase().replace(/^[-_.]+|[-_.]+$/g, "");
+    if (
+      t.length >= 3 &&
+      t.length <= 32 &&
+      !STOP_CONCEPTS.has(t) &&
+      !/^\d+$/.test(t) &&
+      !/^[a-f0-9]{16,}$/i.test(t)
+    ) {
+      out.add(t);
+    }
+  };
+
+  for (const file of files.slice(0, 20)) {
+    for (const part of file.split(/[\\/_.-]+/)) add(part);
+  }
+
+  for (const token of text.split(/[^A-Za-z0-9_+-]+/)) {
+    add(token);
+    if (out.size >= 16) break;
+  }
+
+  return [...out].slice(0, 16);
 }
 
 function stringifyForNarrative(v: unknown): string {
@@ -84,19 +211,30 @@ export function buildSyntheticCompression(
   const narrativeParts = [promptStr, inputStr, outputStr].filter(
     (s) => s.length > 0,
   );
+  const files = [
+    ...new Set([
+      ...extractFiles(raw.toolInput),
+      ...extractFiles(raw.toolOutput),
+      ...extractFiles(raw.raw),
+    ]),
+  ].slice(0, 40);
+  const type = inferType(toolName, raw.hookType);
 
   const result: CompressedObservation = {
     id: raw.id,
     sessionId: raw.sessionId,
     timestamp: raw.timestamp,
-    type: inferType(toolName, raw.hookType),
+    type,
     title: truncate(toolName || "observation", 80),
     subtitle: inputStr ? truncate(inputStr, 120) : undefined,
     facts: [],
     narrative: truncate(narrativeParts.join(" | "), 400),
-    concepts: [],
-    files: extractFiles(raw.toolInput),
-    importance: 5,
+    concepts: extractConcepts(
+      [toolName, promptStr, inputStr, outputStr].filter(Boolean).join(" "),
+      files,
+    ),
+    files,
+    importance: type === "error" ? 8 : type === "file_edit" || type === "file_write" ? 7 : 5,
     confidence: 0.3,
   };
   if (raw.modality) result.modality = raw.modality;

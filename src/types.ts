@@ -206,6 +206,7 @@ export interface HealthSnapshot {
     heapTotal: number;
     rss: number;
     external: number;
+    arrayBuffers?: number;
   };
   cpu: { userMicros: number; systemMicros: number; percent: number };
   eventLoopLagMs: number;
@@ -384,6 +385,7 @@ export interface GraphNode {
   name: string;
   properties: Record<string, unknown>;
   sourceObservationIds: string[];
+  sourceSessionIds?: string[];
   createdAt: string;
   updatedAt?: string;
   aliases?: string[];

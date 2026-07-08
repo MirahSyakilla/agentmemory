@@ -12,6 +12,19 @@ import {
   isConsolidationEnabled,
   isContextInjectionEnabled,
   isDropStaleIndexEnabled,
+  isOtelEnabled,
+  getSearchIndexMaxItems,
+  getVectorIndexMaxItems,
+  getVectorBackend,
+  loadQdrantVectorConfig,
+  getLexicalBackend,
+  loadTantivyConfig,
+  getMetadataBackend,
+  loadPostgresConfig,
+  getGraphBackend,
+  loadNeo4jConfig,
+  getBlobBackend,
+  loadBlobStoreConfig,
 } from "./config.js";
 import {
   createProvider,
@@ -20,8 +33,13 @@ import {
   createImageEmbeddingProvider,
 } from "./providers/index.js";
 import { StateKV } from "./state/kv.js";
+import type { StateKVBackend } from "./state/backend-kv.js";
+import { PostgresKVBackend } from "./state/postgres-kv.js";
+import { Neo4jGraphKVBackend } from "./state/neo4j-graph-kv.js";
 import { KV } from "./state/schema.js";
 import { VectorIndex } from "./state/vector-index.js";
+import { QdrantVectorStore } from "./state/qdrant-vector-store.js";
+import { TantivySearchIndex } from "./state/tantivy-search-index.js";
 import { HybridSearch } from "./state/hybrid-search.js";
 import { IndexPersistence } from "./state/index-persistence.js";
 import { registerPrivacyFunction } from "./functions/privacy.js";
@@ -35,7 +53,11 @@ import {
   registerSearchFunction,
   rebuildIndex,
   getSearchIndex,
+  setSearchIndex,
+  setSearchIndexMaxItems,
+  setLexicalStore,
   setVectorIndex,
+  setVectorStore,
   setEmbeddingProvider,
   setIndexPersistence,
 } from "./functions/search.js";
@@ -99,6 +121,7 @@ import { registerHealthMonitor } from "./health/monitor.js";
 import { initMetrics, OTEL_CONFIG } from "./telemetry/setup.js";
 import { VERSION } from "./version.js";
 import { bootLog } from "./logger.js";
+import { ensureBlobStoreReady } from "./backends/runtime.js";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -169,6 +192,14 @@ async function main() {
 
   const embeddingProvider = createEmbeddingProvider();
   const imageEmbeddingProvider = createImageEmbeddingProvider();
+  const searchIndexMaxItems = getSearchIndexMaxItems();
+  const vectorMaxItems = getVectorIndexMaxItems();
+  const vectorBackend = getVectorBackend();
+  const lexicalBackend = getLexicalBackend();
+  const metadataBackend = getMetadataBackend();
+  const graphBackend = getGraphBackend();
+  const blobBackend = getBlobBackend();
+  const otelEnabled = isOtelEnabled();
 
   bootLog(`Starting worker v${VERSION}...`);
   bootLog(`Engine: ${config.engineUrl}`);
@@ -179,9 +210,23 @@ async function main() {
     bootLog(
       `Embedding provider: ${embeddingProvider.name} (${embeddingProvider.dimensions} dims)`,
     );
+    bootLog(
+      vectorBackend === "qdrant"
+        ? `Vector backend: qdrant`
+        : `Vector backend: memory (${vectorMaxItems} items)`,
+    );
   } else {
     bootLog(`Embedding provider: none (BM25-only mode)`);
   }
+  bootLog(`Search index cap: ${searchIndexMaxItems} items`);
+  bootLog(
+    `Backends: lexical=${lexicalBackend}, vector=${vectorBackend}, metadata=${metadataBackend}, graph=${graphBackend}, blobs=${blobBackend}`,
+  );
+  bootLog(
+    otelEnabled
+      ? `OTEL export: enabled`
+      : `OTEL export: OFF (default; set AGENTMEMORY_OTEL_ENABLED=true and enable iii-observability to collect traces)`,
+  );
   if (imageEmbeddingProvider) {
     bootLog(
       `Image embedding provider: ${imageEmbeddingProvider.name} (${imageEmbeddingProvider.dimensions} dims) — vision-search active`,
@@ -195,11 +240,14 @@ async function main() {
   const sdk = registerWorker(config.engineUrl, {
     workerName: "agentmemory",
     invocationTimeoutMs: 180000,
-    otel: {
-      serviceName: OTEL_CONFIG.serviceName,
-      serviceVersion: OTEL_CONFIG.serviceVersion,
-      metricsExportIntervalMs: OTEL_CONFIG.metricsExportIntervalMs,
-    },
+    otel: otelEnabled
+      ? {
+          enabled: true,
+          serviceName: OTEL_CONFIG.serviceName,
+          serviceVersion: OTEL_CONFIG.serviceVersion,
+          metricsExportIntervalMs: OTEL_CONFIG.metricsExportIntervalMs,
+        }
+      : { enabled: false },
     // Explicit worker telemetry metadata. iii-sdk falls back to
     // auto-detection (cwd / package.json name / hostname) when this
     // is omitted, which produces inconsistent values per host —
@@ -216,14 +264,71 @@ async function main() {
 
   writeWorkerPidfile();
 
-  const kv = new StateKV(sdk);
+  const kvBackends: StateKVBackend[] = [];
+  const shutdownBackends: Array<{ close: () => Promise<void> }> = [];
+
+  if (metadataBackend === "postgres") {
+    const pgConfig = loadPostgresConfig();
+    const pgBackend = new PostgresKVBackend(pgConfig);
+    await pgBackend.ensureReady();
+    kvBackends.push(pgBackend);
+    shutdownBackends.push(pgBackend);
+    bootLog(`Postgres metadata: ready`);
+  }
+
+  if (graphBackend === "neo4j") {
+    const neo4jConfig = loadNeo4jConfig();
+    const neo4jBackend = new Neo4jGraphKVBackend(neo4jConfig);
+    await neo4jBackend.ensureReady();
+    kvBackends.push(neo4jBackend);
+    shutdownBackends.push(neo4jBackend);
+    bootLog(`Neo4j graph: ${neo4jConfig.url}`);
+  }
+
+  if (blobBackend === "filesystem") {
+    const blobStatus = ensureBlobStoreReady(loadBlobStoreConfig());
+    bootLog(`Blob store: ${blobStatus.details}`);
+  }
+
+  const kv = new StateKV(sdk, kvBackends);
   const secret = getEnvVar("AGENTMEMORY_SECRET");
   const metricsStore = new MetricsStore(kv);
   const dedupMap = new DedupMap();
 
-  const vectorIndex = embeddingProvider ? new VectorIndex() : null;
-
+  setSearchIndexMaxItems(searchIndexMaxItems);
+  if (lexicalBackend === "tantivy") {
+    const tantivyConfig = loadTantivyConfig();
+    const tantivyIndex = new TantivySearchIndex({
+      ...tantivyConfig,
+      maxEntries: searchIndexMaxItems,
+    });
+    setSearchIndex(tantivyIndex);
+    setLexicalStore(tantivyIndex);
+    bootLog(`Tantivy lexical: ${tantivyConfig.path}`);
+  } else {
+    setLexicalStore(getSearchIndex());
+  }
+  let vectorIndex: VectorIndex | null = null;
+  let vectorStore: import("./state/vector-store.js").VectorStore | null = null;
+  if (embeddingProvider) {
+    if (vectorBackend === "qdrant") {
+      const qdrantConfig = loadQdrantVectorConfig();
+      const qdrantStore = new QdrantVectorStore({
+        ...qdrantConfig,
+        dimensions: embeddingProvider.dimensions,
+      });
+      await qdrantStore.ensureReady();
+      vectorStore = qdrantStore;
+      bootLog(
+        `Qdrant: ${qdrantConfig.url} collection=${qdrantConfig.collection}`,
+      );
+    } else {
+      vectorIndex = new VectorIndex(vectorMaxItems);
+      vectorStore = vectorIndex;
+    }
+  }
   setVectorIndex(vectorIndex);
+  setVectorStore(vectorStore);
   setEmbeddingProvider(embeddingProvider);
 
   const meterAccessor = hasGetMeter(sdk)
@@ -356,7 +461,7 @@ async function main() {
   const graphWeight = parseFloat(getEnvVar("AGENTMEMORY_GRAPH_WEIGHT") || "0.3");
   const hybridSearch = new HybridSearch(
     bm25Index,
-    vectorIndex,
+    vectorStore,
     embeddingProvider,
     kv,
     embeddingConfig.bm25Weight,
@@ -375,7 +480,19 @@ async function main() {
 
   const healthMonitor = registerHealthMonitor(sdk, kv);
 
-  const indexPersistence = new IndexPersistence(kv, bm25Index, vectorIndex);
+  const maxVectorLoadChars =
+    vectorMaxItems * Math.max((embeddingProvider?.dimensions ?? 1536) * 8, 8192);
+  const maxBm25LoadChars = searchIndexMaxItems * 4_000;
+  const indexPersistence = new IndexPersistence(kv, bm25Index, vectorIndex, {
+    bm25MaxItems: searchIndexMaxItems,
+    maxBm25LoadChars,
+    loadBm25: lexicalBackend === "memory",
+    saveBm25: lexicalBackend === "memory",
+    vectorMaxItems,
+    maxVectorLoadChars,
+    loadVector: vectorIndex !== null,
+    saveVector: vectorIndex !== null,
+  });
   // Wire the persistence hook so delete paths can flush BM25/vector
   // index mutations to disk. Without this, an in-memory remove can be
   // lost across a hard process exit and the persisted snapshot
@@ -598,6 +715,13 @@ async function main() {
     await indexPersistence.save().catch((err) => {
       console.warn(`[agentmemory] Failed to save index on shutdown:`, err);
     });
+    await Promise.all(
+      shutdownBackends.map((backend) =>
+        backend.close().catch((err) => {
+          console.warn(`[agentmemory] Failed to close backend:`, err);
+        }),
+      ),
+    );
     await sdk.shutdown();
     clearWorkerPidfile();
     process.exit(0);

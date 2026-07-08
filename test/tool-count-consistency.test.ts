@@ -20,6 +20,12 @@ describe("Tool count consistency", () => {
     expect(getAllTools().length).toBe(EXPECTED_TOOL_COUNT);
   });
 
+  it("tool descriptions start with clear use guidance", () => {
+    for (const tool of getAllTools()) {
+      expect(tool.description).toMatch(/^Use (to|when|for)\b/);
+    }
+  });
+
   it("cli help derives the tool counts from the registry", () => {
     const cli = readText("src/cli.ts");
     expect(cli).toContain("const ALL_TOOLS_COUNT = getAllTools().length;");

@@ -37,6 +37,75 @@ describe("parseJsonlText", () => {
     expect(toolResult.toolOutput).toBe("README.md\nsrc\n");
   });
 
+  it("parses Codex session JSONL event streams", () => {
+    const text = [
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: "codex-session",
+          timestamp: "2026-06-01T10:00:00.000Z",
+          cwd: "/home/meow/agentmemory",
+          originator: "codex_vscode",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "Fix replay import for Codex sessions",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "call_1",
+          arguments: JSON.stringify({
+            cmd: "rg -n replay src/replay/jsonl-parser.ts",
+            workdir: "/home/meow/agentmemory",
+          }),
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: "src/replay/jsonl-parser.ts:1:import",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:04.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "Implemented Codex replay import.",
+        },
+      }),
+    ].join("\n");
+
+    const out = parseJsonlText(text);
+    expect(out.source).toBe("codex");
+    expect(out.sessionId).toBe("codex-session");
+    expect(out.project).toBe("agentmemory");
+    expect(out.cwd).toBe("/home/meow/agentmemory");
+    expect(out.observations.map((o) => o.hookType)).toEqual([
+      "session_start",
+      "prompt_submit",
+      "pre_tool_use",
+      "post_tool_use",
+      "stop",
+    ]);
+    expect(out.observations[1].userPrompt).toContain("Fix replay import");
+    expect(out.observations[2].toolName).toBe("exec_command");
+    expect(out.observations[4].assistantResponse).toContain("Implemented");
+  });
+
   it("tolerates malformed lines and marks tool errors", () => {
     const out = parseJsonlText(fx("errors.jsonl"));
     const errObs = out.observations.find((o) => o.hookType === "post_tool_failure");
@@ -142,4 +211,3 @@ describe("projectTimeline", () => {
     expect(out.startedAt).toBe(out.endedAt);
   });
 });
-

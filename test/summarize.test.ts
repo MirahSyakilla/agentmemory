@@ -125,6 +125,7 @@ async function setupHandler(opts: {
   sessionId: string;
   obsCount: number;
   provider: MemoryProvider;
+  tags?: string[];
 }) {
   const sdk = mockSdk();
   const kv = mockKV();
@@ -135,6 +136,7 @@ async function setupHandler(opts: {
     startedAt: new Date().toISOString(),
     status: "completed",
     observationCount: opts.obsCount,
+    tags: opts.tags,
   };
   await kv.set("sessions", opts.sessionId, session);
   for (let i = 0; i < opts.obsCount; i++) {
@@ -152,6 +154,7 @@ describe("mem::summarize chunking", () => {
   beforeEach(() => {
     delete process.env.SUMMARIZE_CHUNK_SIZE;
     delete process.env.SUMMARIZE_CHUNK_CONCURRENCY;
+    delete process.env.SUMMARIZE_MAX_CHUNKS;
   });
 
   afterEach(() => {
@@ -381,6 +384,57 @@ describe("mem::summarize chunking", () => {
     expect(result.error).toMatch(/too_many_chunks_skipped: 3\/3/);
   });
 
+  it("uses a deterministic fallback for imported sessions when chunk summarization collapses", async () => {
+    process.env.SUMMARIZE_CHUNK_SIZE = "100";
+    process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    const provider: MemoryProvider & { calls: any[] } = {
+      name: "test",
+      calls: [],
+      compress: async () => "",
+      summarize: async (system: string, user: string) => {
+        (provider as any).calls.push({ system, user });
+        throw new Error("OpenAI API error (400): invalid request");
+      },
+    };
+    const { handler, kv } = await setupHandler({
+      sessionId: "ses_imported_fallback",
+      obsCount: 250,
+      provider,
+      tags: ["jsonl-import"],
+    });
+
+    const result: any = await handler({ sessionId: "ses_imported_fallback" });
+
+    expect(result.success).toBe(true);
+    expect(result.fallback).toBe(true);
+    expect(result.summary.observationCount).toBe(250);
+    expect(result.summary.narrative).toContain("Session captured 250 observations");
+    const stored: any = await kv.get("summaries", "ses_imported_fallback");
+    expect(stored?.observationCount).toBe(250);
+  });
+
+  it("uses a deterministic fallback for imported sessions when no provider is configured", async () => {
+    const provider: MemoryProvider = {
+      name: "noop",
+      compress: async () => "",
+      summarize: async () => "",
+    };
+    const { handler, kv } = await setupHandler({
+      sessionId: "ses_imported_no_provider",
+      obsCount: 5,
+      provider,
+      tags: ["jsonl-import"],
+    });
+
+    const result: any = await handler({ sessionId: "ses_imported_no_provider" });
+
+    expect(result.success).toBe(true);
+    expect(result.fallback).toBe(true);
+    expect(result.fallbackReason).toBe("no_provider");
+    const stored: any = await kv.get("summaries", "ses_imported_no_provider");
+    expect(stored?.observationCount).toBe(5);
+  });
+
   it("chunks run in parallel batches according to SUMMARIZE_CHUNK_CONCURRENCY", async () => {
     process.env.SUMMARIZE_CHUNK_SIZE = "100";
     process.env.SUMMARIZE_CHUNK_CONCURRENCY = "2";
@@ -413,6 +467,60 @@ describe("mem::summarize chunking", () => {
     // 4 chunks at concurrency 2 → max 2 in flight at once during the chunk phase.
     // Reduce is a single call so doesn't bump it.
     expect(maxInflight).toBe(2);
+  });
+
+  it("uses deterministic fallback instead of LLM fan-out when chunk count is capped", async () => {
+    process.env.SUMMARIZE_CHUNK_SIZE = "10";
+    process.env.SUMMARIZE_MAX_CHUNKS = "2";
+    const provider = makeProvider([
+      summaryXml({ title: "should-not-call-provider" }),
+    ]);
+    const { handler, kv } = await setupHandler({
+      sessionId: "ses_too_large",
+      obsCount: 25,
+      provider,
+    });
+
+    const result: any = await handler({ sessionId: "ses_too_large" });
+
+    expect(result.success).toBe(true);
+    expect(result.fallback).toBe(true);
+    expect(result.fallbackReason).toContain("session_too_large_for_llm_summary");
+    expect(provider.calls).toHaveLength(0);
+    const stored: any = await kv.get("summaries", "ses_too_large");
+    expect(stored?.observationCount).toBe(25);
+  });
+
+  it("joins concurrent summarize calls for the same session", async () => {
+    let resolveSummary: (value: string) => void = () => {};
+    const provider: MemoryProvider & { calls: any[] } = {
+      name: "test",
+      calls: [],
+      compress: async () => "",
+      summarize: async (system: string, user: string) => {
+        provider.calls.push({ system, user });
+        return new Promise((resolve) => {
+          resolveSummary = resolve;
+        });
+      },
+    };
+    const { handler } = await setupHandler({
+      sessionId: "ses_join",
+      obsCount: 5,
+      provider,
+    });
+
+    const first = handler({ sessionId: "ses_join" });
+    await vi.waitFor(() => expect(provider.calls).toHaveLength(1));
+    const second = handler({ sessionId: "ses_join" });
+    resolveSummary(summaryXml({ title: "joined" }));
+
+    const results: any[] = await Promise.all([first, second]);
+    expect(results[0].success).toBe(true);
+    expect(results[1].success).toBe(true);
+    expect(results[0].summary.title).toBe("joined");
+    expect(results[1].summary.title).toBe("joined");
+    expect(provider.calls).toHaveLength(1);
   });
 
   // #783: markdown-wrapped XML used to silently fail parsing because

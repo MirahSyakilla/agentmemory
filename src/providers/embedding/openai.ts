@@ -6,6 +6,7 @@ import {
   buildAuthHeaders,
   buildEmbeddingUrl,
   detectAzure,
+  formatHttpErrorBody,
   normalizeBaseUrl,
 } from "../_openai-shared.js";
 
@@ -135,7 +136,9 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 
     if (!response.ok) {
       const err = await response.text();
-      throw new Error(`OpenAI embedding failed (${response.status}): ${err}`);
+      throw new Error(
+        `OpenAI embedding failed (${response.status}): ${formatHttpErrorBody(err)}`,
+      );
     }
 
     const data = (await response.json()) as {

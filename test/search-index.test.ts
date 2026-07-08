@@ -41,6 +41,23 @@ describe("SearchIndex", () => {
     expect(results[0].obsId).toBe("obs_1");
   });
 
+  it("replaces an existing observation without leaving stale postings", () => {
+    index.add(makeObs({ id: "obs_replace", title: "alpha topic" }));
+    index.add(
+      makeObs({
+        id: "obs_replace",
+        title: "beta topic",
+        narrative: "Moved the note to a different subject",
+        concepts: ["beta"],
+        facts: ["Updated topic"],
+      }),
+    );
+
+    expect(index.size).toBe(1);
+    expect(index.search("alpha")).toEqual([]);
+    expect(index.search("beta")[0].obsId).toBe("obs_replace");
+  });
+
   it("returns empty for no matches", () => {
     index.add(makeObs());
     expect(index.search("database")).toEqual([]);

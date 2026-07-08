@@ -291,6 +291,53 @@ describe("agentmemory connect — opencode adapter (#872)", () => {
   });
 });
 
+describe("agentmemory connect — codex adapter (mock filesystem)", () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  let originalUserprofile: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "am-codex-"));
+    originalHome = process.env["HOME"];
+    originalUserprofile = process.env["USERPROFILE"];
+    process.env["HOME"] = tmpHome;
+    process.env["USERPROFILE"] = tmpHome;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (originalHome !== undefined) process.env["HOME"] = originalHome;
+    else delete process.env["HOME"];
+    if (originalUserprofile !== undefined)
+      process.env["USERPROFILE"] = originalUserprofile;
+    else delete process.env["USERPROFILE"];
+    rmSync(tmpHome, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  async function loadCodex(): Promise<ConnectAdapter> {
+    const mod = await import("../src/cli/connect/codex.js?t=" + Date.now());
+    return (mod as { adapter: ConnectAdapter }).adapter;
+  }
+
+  it("writes Codex MCP config against the local standalone bundle instead of npx", async () => {
+    require("node:fs").mkdirSync(join(tmpHome, ".codex"), { recursive: true });
+    writeFileSync(join(tmpHome, ".codex", "config.toml"), "");
+
+    const a = await loadCodex();
+    expect(a.detect()).toBe(true);
+
+    const result = await a.install({ dryRun: false, force: false });
+    expect(result.kind).toBe("installed");
+
+    const config = readFileSync(join(tmpHome, ".codex", "config.toml"), "utf-8");
+    expect(config).toContain('[mcp_servers.agentmemory]');
+    expect(config).toContain('command = "node"');
+    expect(config).toContain('/home/meow/agentmemory/dist/standalone.mjs');
+    expect(config).not.toContain('@agentmemory/mcp');
+  });
+});
+
 describe("agentmemory connect — copilot-cli adapter (mock filesystem)", () => {
   let tmpHome: string;
   let originalHome: string | undefined;

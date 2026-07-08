@@ -26,6 +26,13 @@ describe("loadEnvFile", () => {
     process.env["USERPROFILE"] = sandboxHome;
     delete process.env["AGENTMEMORY_AUTO_COMPRESS"];
     delete process.env["AGENTMEMORY_DROP_STALE_INDEX"];
+    delete process.env["AGENTMEMORY_OTEL_ENABLED"];
+    delete process.env["AGENTMEMORY_OBSERVABILITY_ENABLED"];
+    delete process.env["AGENTMEMORY_VECTOR_BACKEND"];
+    delete process.env["AGENTMEMORY_LEXICAL_BACKEND"];
+    delete process.env["AGENTMEMORY_METADATA_BACKEND"];
+    delete process.env["AGENTMEMORY_GRAPH_BACKEND"];
+    delete process.env["AGENTMEMORY_BLOB_BACKEND"];
     delete process.env["CONSOLIDATION_ENABLED"];
     delete process.env["GRAPH_EXTRACTION_ENABLED"];
     delete process.env["TOKEN"];
@@ -88,5 +95,49 @@ describe("loadEnvFile", () => {
     writeEnv("AGENTMEMORY_DROP_STALE_INDEX=true");
     const cfg = await freshConfig();
     expect(cfg.isDropStaleIndexEnabled()).toBe(true);
+  });
+
+  it("leaves OTEL export disabled by default", async () => {
+    const cfg = await freshConfig();
+    expect(cfg.isOtelEnabled()).toBe(false);
+  });
+
+  it("reads AGENTMEMORY_OTEL_ENABLED from the env file", async () => {
+    writeEnv("AGENTMEMORY_OTEL_ENABLED=true");
+    const cfg = await freshConfig();
+    expect(cfg.isOtelEnabled()).toBe(true);
+  });
+
+  it("accepts AGENTMEMORY_OBSERVABILITY_ENABLED as an OTEL alias", async () => {
+    writeEnv("AGENTMEMORY_OBSERVABILITY_ENABLED=1");
+    const cfg = await freshConfig();
+    expect(cfg.isOtelEnabled()).toBe(true);
+  });
+
+  it("defaults to the external backend stack", async () => {
+    const cfg = await freshConfig();
+    expect(cfg.getVectorBackend()).toBe("qdrant");
+    expect(cfg.getLexicalBackend()).toBe("tantivy");
+    expect(cfg.getMetadataBackend()).toBe("postgres");
+    expect(cfg.getGraphBackend()).toBe("neo4j");
+    expect(cfg.getBlobBackend()).toBe("filesystem");
+  });
+
+  it("ignores legacy fallback backend overrides", async () => {
+    writeEnv(
+      [
+        "AGENTMEMORY_VECTOR_BACKEND=memory",
+        "AGENTMEMORY_LEXICAL_BACKEND=memory",
+        "AGENTMEMORY_METADATA_BACKEND=iii-kv",
+        "AGENTMEMORY_GRAPH_BACKEND=iii-kv",
+        "AGENTMEMORY_BLOB_BACKEND=inline",
+      ].join("\n"),
+    );
+    const cfg = await freshConfig();
+    expect(cfg.getVectorBackend()).toBe("qdrant");
+    expect(cfg.getLexicalBackend()).toBe("tantivy");
+    expect(cfg.getMetadataBackend()).toBe("postgres");
+    expect(cfg.getGraphBackend()).toBe("neo4j");
+    expect(cfg.getBlobBackend()).toBe("filesystem");
   });
 });

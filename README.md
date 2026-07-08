@@ -719,15 +719,15 @@ npm install && npm run build && npm start
 
 This starts agentmemory with a local `iii-engine` if `iii` is already installed, or falls back to Docker Compose if Docker is available. REST, streams, and the viewer bind to `127.0.0.1` by default.
 
-Install `iii-engine` manually. **agentmemory currently pins `iii-engine` to `v0.11.2`** — `v0.11.6` introduces a new sandbox-everything-via-`iii worker add` model that agentmemory hasn't been refactored for yet. Pin lifts once the refactor lands. Override with `AGENTMEMORY_III_VERSION=<version>` if you've migrated to the sandbox model manually.
+Install `iii-engine` manually. **agentmemory currently pins `iii-engine` to `v0.11.3`** — `v0.11.6` introduces a new sandbox-everything-via-`iii worker add` model that agentmemory hasn't been refactored for yet. Pin lifts once the refactor lands. Override with `AGENTMEMORY_III_VERSION=<version>` if you've migrated to the sandbox model manually.
 
-- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.2/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
+- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.3/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
 - **macOS x64:** swap `aarch64-apple-darwin` for `x86_64-apple-darwin`
 - **Linux x64:** swap for `x86_64-unknown-linux-gnu`
 - **Linux arm64:** swap for `aarch64-unknown-linux-gnu`
-- **Windows:** download `iii-x86_64-pc-windows-msvc.zip` from [iii-hq/iii releases v0.11.2](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2), extract `iii.exe`, add to PATH
+- **Windows:** download `iii-x86_64-pc-windows-msvc.zip` from [iii-hq/iii releases v0.11.3](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3), extract `iii.exe`, add to PATH
 
-Or use Docker (the bundled `docker-compose.yml` pulls `iiidev/iii:0.11.2`). Full docs: [iii.dev/docs](https://iii.dev/docs).
+Or use Docker (the bundled `docker-compose.yml` pulls `iiidev/iii:0.11.3`). Full docs: [iii.dev/docs](https://iii.dev/docs).
 
 ### Windows
 
@@ -736,8 +736,8 @@ agentmemory runs on Windows 10/11, but the Node.js package alone isn't enough �
 **Option A — Prebuilt Windows binary (recommended):**
 
 ```powershell
-# 1. Open https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2 in your browser
-#    (we pin to v0.11.2 until agentmemory refactors for the new sandbox
+# 1. Open https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3 in your browser
+#    (we pin to v0.11.3 until agentmemory refactors for the new sandbox
 #     model that engine v0.11.6+ requires)
 # 2. Download iii-x86_64-pc-windows-msvc.zip
 #    (or iii-aarch64-pc-windows-msvc.zip if you're on an ARM machine)
@@ -746,7 +746,7 @@ agentmemory runs on Windows 10/11, but the Node.js package alone isn't enough �
 #    (agentmemory checks that location automatically)
 # 4. Verify:
 iii --version
-# Should print: 0.11.2
+# Should print: 0.11.3
 
 # 5. Then run agentmemory as usual:
 npx -y @agentmemory/agentmemory
@@ -1157,11 +1157,11 @@ iii console --port 3114 \
   <em>Traces: waterfall / flame / service breakdown for every memory operation.</em>
 </p>
 
-**Traces are already on:**
+**Traces are opt-in:**
 
-`iii-config.yaml` ships with the `iii-observability` worker enabled (`exporter: memory`, `sampling_ratio: 1.0`, metrics + logs). No extra config needed — the moment agentmemory starts, every memory operation emits a trace span and a structured log the console can read.
+`iii-config.yaml` ships with the `iii-observability` worker present but disabled by default. The local `memory` exporter keeps spans/logs inside iii-engine, so leaving it on during hook-heavy daemon use can grow engine RSS without bound. For a short debugging session, set `enabled: true` in `iii-config.yaml` and `AGENTMEMORY_OTEL_ENABLED=true` for the worker.
 
-If you want to export to Jaeger/Honeycomb/Grafana Tempo instead, change `exporter: memory` to `exporter: otlp` and set the collector endpoint per iii's observability docs.
+If you want long-running traces, change `exporter: memory` to `exporter: otlp` and set the collector endpoint per iii's observability docs.
 
 > **Heads-up:** no auth is enforced on the console itself — keep it bound to `127.0.0.1` (the default) and never expose it publicly.
 
@@ -1179,7 +1179,7 @@ That means one more command extends agentmemory with an entire new capability.
 iii worker add iii-pubsub          # fan memory writes out to every connected instance
 iii worker add iii-cron            # scheduled consolidation, decay sweeps, snapshot rotation
 iii worker add iii-queue           # durable retries for embedding + compression jobs
-iii worker add iii-observability   # OTEL traces on every memory op (default on)
+iii worker add iii-observability   # optional OTEL traces; off by default in agentmemory
 iii worker add iii-sandbox         # run recalled code inside an isolated microVM
 iii worker add iii-database        # swap in a SQL-backed state adapter
 iii worker add mcp                 # generic MCP host alongside the agentmemory MCP
@@ -1192,7 +1192,7 @@ Each `iii worker add` registers new functions and triggers into the same engine 
 | [`iii-pubsub`](https://workers.iii.dev/workers/iii-pubsub) | Multi-instance memory: every `remember` fans out, every `search` reads the union |
 | [`iii-cron`](https://workers.iii.dev/workers/iii-cron) | Scheduled lifecycle — nightly consolidation, weekly snapshots, decay on a fixed clock |
 | [`iii-queue`](https://workers.iii.dev/workers/iii-queue) | Durable retries: failed embedding + compression jobs survive restart, no lost observations |
-| [`iii-observability`](https://workers.iii.dev/workers/iii-observability) | OTEL traces, metrics, logs on every function — wired in `iii-config.yaml` from day one |
+| [`iii-observability`](https://workers.iii.dev/workers/iii-observability) | Optional OTEL traces, metrics, logs on every function — wired in `iii-config.yaml`, disabled by default for daemon safety |
 | [`iii-sandbox`](https://workers.iii.dev/workers/iii-sandbox) | Code that came out of `memory_recall` runs inside a throwaway VM, not your shell |
 | [`iii-database`](https://workers.iii.dev/workers/iii-database) | SQL-backed state adapter when you outgrow the in-memory KV defaults |
 | [`mcp`](https://workers.iii.dev/workers/mcp) | Stand up extra MCP servers next to agentmemory's, share the same engine |
@@ -1436,6 +1436,17 @@ Create `~/.agentmemory/.env`:
 # VECTOR_WEIGHT=0.6
 # TOKEN_BUDGET=2000
 
+# Backend storage (mandatory service stack)
+# AGENTMEMORY_QDRANT_URL=http://127.0.0.1:6333
+# AGENTMEMORY_TANTIVY_PATH=~/.agentmemory/tantivy
+# AGENTMEMORY_PG_HOST=127.0.0.1
+# AGENTMEMORY_PG_DATABASE=agentmemory
+# AGENTMEMORY_PG_USER=agentmemory
+# AGENTMEMORY_PG_PASSWORD=agentmemory
+# AGENTMEMORY_NEO4J_URL=neo4j://127.0.0.1:7687
+# AGENTMEMORY_NEO4J_USER=neo4j
+# AGENTMEMORY_NEO4J_PASSWORD=agentmemory
+
 # Auth
 # AGENTMEMORY_SECRET=your-secret
 
@@ -1496,6 +1507,13 @@ Create `~/.agentmemory/.env`:
 # AGENTMEMORY_TOOLS=core
 ```
 
+agentmemory keeps the same REST, MCP, hook, Codex CLI, and Codex VS Code plugin behavior while using external storage underneath the worker. The default backend stack is Qdrant for vectors, Tantivy for lexical search, Postgres for metadata/session JSON, Neo4j for graph nodes and relationships, and the filesystem for blobs. For a fresh local Postgres install, create the default database once:
+
+```bash
+sudo -u postgres psql -c "CREATE ROLE agentmemory WITH LOGIN PASSWORD 'agentmemory';"
+sudo -u postgres createdb -O agentmemory agentmemory
+```
+
 ---
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
@@ -1511,6 +1529,7 @@ Create `~/.agentmemory/.env`:
 | `POST` | `/agentmemory/session/start` | Start session + get context |
 | `POST` | `/agentmemory/session/end` | End session |
 | `POST` | `/agentmemory/observe` | Capture observation |
+| `GET` | `/agentmemory/observations?sessionId=<id>&limit=500&offset=0` | Page session observations |
 | `POST` | `/agentmemory/smart-search` | Hybrid search |
 | `POST` | `/agentmemory/context` | Generate context |
 | `POST` | `/agentmemory/remember` | Save to long-term memory |

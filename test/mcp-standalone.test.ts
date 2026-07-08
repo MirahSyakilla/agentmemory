@@ -262,6 +262,21 @@ describe("handleToolCall", () => {
     expect(mem?.files).toEqual(["src/auth.ts"]);
   });
 
+  it("memory_save persists a trimmed project in local fallback", async () => {
+    const kv = new InMemoryKV();
+    const result = await handleToolCall(
+      "memory_save",
+      {
+        content: "JWT refresh rotation",
+        project: "  api  ",
+      },
+      kv,
+    );
+    const saved = JSON.parse(result.content[0].text);
+    const mem = await kv.get<{ project?: string }>("mem:memories", saved.saved);
+    expect(mem?.project).toBe("api");
+  });
+
   it("memory_smart_search falls back to substring match in the standalone shim (#139)", async () => {
     const kv = new InMemoryKV();
     await handleToolCall(
@@ -335,6 +350,50 @@ describe("handleToolCall", () => {
       ).content[0].text,
     );
     expect(byConcept.results).toHaveLength(1);
+  });
+
+  it("memory_recall filters local fallback results by project", async () => {
+    const kv = new InMemoryKV();
+    await handleToolCall(
+      "memory_save",
+      { content: "shared auth note", project: "api" },
+      kv,
+    );
+    await handleToolCall(
+      "memory_save",
+      { content: "shared auth note", project: "web" },
+      kv,
+    );
+    const result = await handleToolCall(
+      "memory_recall",
+      { query: "shared auth", project: "api" },
+      kv,
+    );
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].project).toBe("api");
+  });
+
+  it("memory_smart_search filters local fallback results by project", async () => {
+    const kv = new InMemoryKV();
+    await handleToolCall(
+      "memory_save",
+      { content: "token rotation checklist", project: "api" },
+      kv,
+    );
+    await handleToolCall(
+      "memory_save",
+      { content: "token rotation checklist", project: "web" },
+      kv,
+    );
+    const result = await handleToolCall(
+      "memory_smart_search",
+      { query: "token rotation", project: "web" },
+      kv,
+    );
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].project).toBe("web");
   });
 
   it("memory_sessions honours the limit arg (#139)", async () => {

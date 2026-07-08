@@ -4,6 +4,8 @@ import { KV } from '../state/schema.js'
 import { StateKV } from '../state/kv.js'
 import { SearchIndex } from '../state/search-index.js'
 import { VectorIndex } from '../state/vector-index.js'
+import type { VectorStore } from '../state/vector-store.js'
+import type { LexicalStore } from '../state/lexical-store.js'
 import type { EmbeddingProvider } from '../types.js'
 import { memoryToObservation } from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
@@ -11,20 +13,56 @@ import { logger } from "../logger.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
 
 let index: SearchIndex | null = null
+let lexicalStore: LexicalStore | null = null
 let vectorIndex: VectorIndex | null = null
+let vectorStore: VectorStore | null = null
 let currentEmbeddingProvider: EmbeddingProvider | null = null
+let searchIndexMaxItems = Number.POSITIVE_INFINITY
 
 export function getSearchIndex(): SearchIndex {
-  if (!index) index = new SearchIndex()
+  if (!index) index = new SearchIndex(searchIndexMaxItems)
   return index
+}
+
+export function setSearchIndex(idx: SearchIndex | null): void {
+  index = idx
+}
+
+export function setLexicalStore(store: LexicalStore | null): void {
+  lexicalStore = store
+}
+
+export function getLexicalStore(): LexicalStore {
+  return lexicalStore ?? getSearchIndex()
+}
+
+export function setSearchIndexMaxItems(maxItems: number): void {
+  searchIndexMaxItems =
+    Number.isFinite(maxItems) && maxItems > 0
+      ? Math.floor(maxItems)
+      : Number.POSITIVE_INFINITY
+  if (!index) return
+  const next = new SearchIndex(searchIndexMaxItems)
+  next.restoreFrom(index)
+  index = next
+  if (!lexicalStore) lexicalStore = index
 }
 
 export function setVectorIndex(idx: VectorIndex | null): void {
   vectorIndex = idx
+  vectorStore = idx
 }
 
 export function getVectorIndex(): VectorIndex | null {
   return vectorIndex
+}
+
+export function setVectorStore(store: VectorStore | null): void {
+  vectorStore = store
+}
+
+export function getVectorStore(): VectorStore | null {
+  return vectorStore
 }
 
 export function setEmbeddingProvider(provider: EmbeddingProvider | null): void {
@@ -35,8 +73,28 @@ export function getEmbeddingProvider(): EmbeddingProvider | null {
   return currentEmbeddingProvider
 }
 
-export function vectorIndexRemove(id: string): void {
-  vectorIndex?.remove(id);
+export async function vectorIndexRemove(id: string): Promise<void> {
+  try {
+    await vectorStore?.remove(id);
+  } catch (err) {
+    logger.warn("vector-index remove failed — skipping", {
+      id,
+      backend: vectorStore?.backend ?? "memory",
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+export async function lexicalIndexAdd(obs: CompressedObservation): Promise<void> {
+  await getLexicalStore().add(obs)
+}
+
+export async function lexicalIndexRemove(id: string): Promise<void> {
+  await getLexicalStore().remove(id)
+}
+
+export function lexicalIndexHas(id: string): boolean {
+  return getLexicalStore().has(id)
 }
 
 // Persistence sync hook. Without this, index removals only live in
@@ -97,7 +155,7 @@ export async function vectorIndexAddGuarded(
   text: string,
   context: { kind: "memory" | "observation" | "synthetic"; logId: string },
 ): Promise<boolean> {
-  const vi = vectorIndex
+  const vi = vectorStore
   const ep = currentEmbeddingProvider
   if (!vi || !ep) return false
   try {
@@ -112,7 +170,7 @@ export async function vectorIndexAddGuarded(
       })
       return false
     }
-    vi.add(id, sessionId, embedding)
+    await vi.add(id, sessionId, embedding)
     return true
   } catch (err) {
     logger.warn("vector-index add: embed failed — skipping", {
@@ -143,7 +201,7 @@ export async function vectorIndexAddBatchGuarded(
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }>,
 ): Promise<{ ok: number; fail: number }> {
-  const vi = vectorIndex
+  const vi = vectorStore
   const ep = currentEmbeddingProvider
   if (!vi || !ep || items.length === 0) return { ok: 0, fail: 0 }
 
@@ -171,7 +229,12 @@ export async function vectorIndexAddBatchGuarded(
     return { ok: 0, fail: items.length }
   }
 
-  let ok = 0
+  const validItems: Array<{
+    obsId: string
+    sessionId: string
+    embedding: Float32Array
+    context: { kind: "memory" | "observation" | "synthetic"; logId: string }
+  }> = []
   let fail = 0
   for (let i = 0; i < items.length; i++) {
     const item = items[i]
@@ -187,19 +250,39 @@ export async function vectorIndexAddBatchGuarded(
       fail++
       continue
     }
-    try {
-      vi.add(item.id, item.sessionId, embedding)
-      ok++
-    } catch (err) {
-      logger.warn("vector-index add batch: index write failed — skipping item", {
-        kind: item.context.kind,
-        id: item.context.logId,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      fail++
-    }
+    validItems.push({
+      obsId: item.id,
+      sessionId: item.sessionId,
+      embedding,
+      context: item.context,
+    })
   }
-  return { ok, fail }
+
+  if (validItems.length === 0) return { ok: 0, fail }
+
+  try {
+    if (vi.addBatch) {
+      const result = await vi.addBatch(
+        validItems.map(({ obsId, sessionId, embedding }) => ({
+          obsId,
+          sessionId,
+          embedding,
+        })),
+      )
+      return { ok: result.ok, fail: fail + result.fail }
+    }
+    for (const item of validItems) {
+      await vi.add(item.obsId, item.sessionId, item.embedding)
+    }
+    return { ok: validItems.length, fail }
+  } catch (err) {
+    logger.warn("vector-index add batch: index write failed — skipping batch", {
+      batchSize: validItems.length,
+      backend: vi.backend ?? "memory",
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return { ok: 0, fail: fail + validItems.length }
+  }
 }
 
 // Embed-batch size for rebuild. Each item is one /v1/embeddings call's
@@ -219,33 +302,47 @@ function getRebuildEmbedBatchSize(): number {
 }
 
 export async function rebuildIndex(kv: StateKV): Promise<number> {
-  const idx = getSearchIndex()
-  idx.clear()
+  const idx = getLexicalStore()
+  const bulkIndex = idx as LexicalStore & {
+    beginBulk?: () => void
+    endBulk?: () => void
+  }
+  bulkIndex.beginBulk?.()
+  try {
+    idx.clear()
+    const maxItems = idx.capacity
 
-  // BM25 clear above wipes stale doc entries; the vector index has the
-  // symmetric concern — memories/observations deleted between runs
-  // would leave orphan embeddings here forever. Clear both before the
-  // repopulation loops run, so BM25 and vector stay in sync.
-  vectorIndex?.clear()
+    // BM25 clear above wipes stale doc entries; the vector index has the
+    // symmetric concern — memories/observations deleted between runs
+    // would leave orphan embeddings here forever. Clear both before the
+    // repopulation loops run, so BM25 and vector stay in sync.
+    try {
+      await vectorStore?.clear()
+    } catch (err) {
+      logger.warn('rebuildIndex: failed to clear vector index', {
+        backend: vectorStore?.backend ?? "memory",
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
 
-  const batchSize = getRebuildEmbedBatchSize()
+    const batchSize = getRebuildEmbedBatchSize()
   // Accumulator for the batched embed flush. BM25 add is synchronous and
   // doesn't need batching — only the vector path benefits.
-  type EmbedJob = {
+    type EmbedJob = {
     id: string
     sessionId: string
     text: string
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }
-  const pending: EmbedJob[] = []
-  let count = 0
+    const pending: EmbedJob[] = []
+    let count = 0
 
-  const flush = async (): Promise<void> => {
+    const flush = async (): Promise<void> => {
     if (pending.length === 0) return
     await vectorIndexAddBatchGuarded(pending)
     pending.length = 0
   }
-  const enqueue = async (job: EmbedJob): Promise<void> => {
+    const enqueue = async (job: EmbedJob): Promise<void> => {
     pending.push(job)
     if (pending.length >= batchSize) await flush()
   }
@@ -254,69 +351,103 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   // scopes, so they need a separate walk. Without this, mem::remember
   // entries vanish from BM25 on every restart even after the live-write
   // fix in remember.ts (#257).
-  try {
-    const memories = await kv.list<Memory>(KV.memories)
-    for (const memory of memories) {
-      if (memory.isLatest === false) continue
-      if (!memory.title || !memory.content) continue
-      idx.add(memoryToObservation(memory))
-      await enqueue({
-        id: memory.id,
-        sessionId: memory.sessionIds?.[0] ?? 'memory',
-        text: memory.title + ' ' + memory.content,
-        context: { kind: "memory", logId: memory.id },
-      })
-      count++
-    }
-  } catch (err) {
-    logger.warn('rebuildIndex: failed to load memories', {
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
-
-  const sessions = await kv.list<Session>(KV.sessions)
-  if (!sessions.length) {
-    await flush()
-    return count
-  }
-
-  const obsPerSession: CompressedObservation[][] = []
-  const failedSessions: string[] = []
-  for (let batch = 0; batch < sessions.length; batch += 10) {
-    const chunk = sessions.slice(batch, batch + 10)
-    const results = await Promise.all(
-      chunk.map(async (s) => {
-        try {
-          return await kv.list<CompressedObservation>(KV.observations(s.id))
-        } catch {
-          failedSessions.push(s.id)
-          return [] as CompressedObservation[]
-        }
-      })
-    )
-    obsPerSession.push(...results)
-  }
-  if (failedSessions.length > 0) {
-    logger.warn('rebuildIndex: failed to load observations for sessions', { failedSessions })
-  }
-  for (const observations of obsPerSession) {
-    for (const obs of observations) {
-      if (obs.title && obs.narrative) {
-        idx.add(obs)
+    try {
+      const memories = await kv.list<Memory>(KV.memories)
+      for (const memory of memories) {
+        if (count >= maxItems) break
+        if (memory.isLatest === false) continue
+        if (!memory.title || !memory.content) continue
+        idx.add(memoryToObservation(memory))
         await enqueue({
-          id: obs.id,
-          sessionId: obs.sessionId,
-          text: obs.title + ' ' + obs.narrative,
-          context: { kind: "observation", logId: obs.id },
+          id: memory.id,
+          sessionId: memory.sessionIds?.[0] ?? 'memory',
+          text: memory.title + ' ' + memory.content,
+          context: { kind: "memory", logId: memory.id },
         })
         count++
       }
+    } catch (err) {
+      logger.warn('rebuildIndex: failed to load memories', {
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
-  }
 
-  // Drain the last partial batch.
-  await flush()
-  return count
+    const sessions = await kv.list<Session>(KV.sessions)
+    if (!sessions.length) {
+      await flush()
+      return count
+    }
+    const rebuildSessionMax =
+      Number.isFinite(maxItems) && maxItems > 0
+        ? Math.max(1, Math.min(maxItems, 5_000))
+        : 5_000
+    const orderedSessions = sessions
+      .slice()
+      .sort((a, b) =>
+        String(b.updatedAt ?? b.startedAt ?? "").localeCompare(
+          String(a.updatedAt ?? a.startedAt ?? ""),
+        ),
+      )
+
+    const failedSessions: string[] = []
+    const skippedLargeSessions: string[] = []
+    const plannedSessions: Session[] = []
+    let estimatedIndexed = count
+    for (const session of orderedSessions) {
+      if (estimatedIndexed >= maxItems) break
+      const obsCount = session.observationCount ?? 0
+      if (obsCount > rebuildSessionMax) {
+        skippedLargeSessions.push(session.id)
+        continue
+      }
+      plannedSessions.push(session)
+      estimatedIndexed += Math.max(obsCount, 1)
+    }
+    plannedSessions.reverse()
+    for (let batch = 0; batch < plannedSessions.length && count < maxItems; batch += 10) {
+      const chunk = plannedSessions.slice(batch, batch + 10)
+      const results = await Promise.all(
+        chunk.map(async (s) => {
+          try {
+            return await kv.list<CompressedObservation>(KV.observations(s.id))
+          } catch {
+            failedSessions.push(s.id)
+            return [] as CompressedObservation[]
+          }
+        })
+      )
+      for (const observations of results) {
+        for (const obs of observations) {
+          if (count >= maxItems) break
+          if (obs.title && obs.narrative) {
+            idx.add(obs)
+            await enqueue({
+              id: obs.id,
+              sessionId: obs.sessionId,
+              text: obs.title + ' ' + obs.narrative,
+              context: { kind: "observation", logId: obs.id },
+            })
+            count++
+          }
+        }
+      }
+    }
+    if (failedSessions.length > 0) {
+      logger.warn('rebuildIndex: failed to load observations for sessions', { failedSessions })
+    }
+    if (skippedLargeSessions.length > 0) {
+      logger.warn('rebuildIndex: skipped oversized sessions', {
+        skippedLargeSessions,
+        maxObservationsPerSession: rebuildSessionMax,
+      })
+    }
+
+    // Drain the last partial batch.
+    await flush()
+    return count
+  } finally {
+    bulkIndex.endBulk?.()
+  }
 }
 
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
@@ -331,7 +462,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       token_budget?: number
       agentId?: string
     }) => {
-      const idx = getSearchIndex()
+      const idx = getLexicalStore()
 
       // Input validation / normalization.
       if (typeof data?.query !== 'string' || !data.query.trim()) {

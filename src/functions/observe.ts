@@ -7,7 +7,7 @@ import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { isAutoCompressEnabled } from "../config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
-import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
+import { lexicalIndexAdd, vectorIndexAddGuarded } from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 
@@ -124,16 +124,6 @@ export function registerObserveFunction(
       const pendingImageData = extractedImage;
 
       return withKeyedLock(`obs:${payload.sessionId}`, async () => {
-        if (maxObservationsPerSession && maxObservationsPerSession > 0) {
-          const existing = await kv.list(KV.observations(payload.sessionId));
-          if (existing.length >= maxObservationsPerSession) {
-            return {
-              success: false,
-              error: `Session observation limit reached (${maxObservationsPerSession})`,
-            };
-          }
-        }
-
         // Existing session is the source of truth for agentId (even
         // undefined). Env AGENT_ID only fires when no session row
         // exists yet — otherwise an unscoped session would get
@@ -143,6 +133,20 @@ export function registerObserveFunction(
           observationCount?: number;
           firstPrompt?: string;
         }>(KV.sessions, payload.sessionId);
+
+        if (maxObservationsPerSession && maxObservationsPerSession > 0) {
+          const currentCount =
+            typeof existingSession?.observationCount === "number"
+              ? existingSession.observationCount
+              : 0;
+          if (currentCount >= maxObservationsPerSession) {
+            return {
+              success: false,
+              error: `Session observation limit reached (${maxObservationsPerSession})`,
+            };
+          }
+        }
+
         const inheritedAgentId = existingSession
           ? existingSession.agentId
           : getAgentId();
@@ -295,7 +299,7 @@ export function registerObserveFunction(
             obsId,
             synthetic,
           );
-          getSearchIndex().add(synthetic);
+          await lexicalIndexAdd(synthetic);
           await vectorIndexAddGuarded(
             synthetic.id,
             synthetic.sessionId,

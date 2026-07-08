@@ -223,6 +223,108 @@ describe("viewer session rendering", () => {
     expect(getElement("view-dashboard").innerHTML).toContain("Unknown session");
   });
 
+  it("estimates dashboard token savings from active sessions only", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    sandbox.window.location.search = "?tokenBudget=2000";
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessions: [
+        { id: "active-1", status: "active", observationCount: 10, startedAt: "2026-05-13T12:00:00Z" },
+        { id: "done-1", status: "completed", observationCount: 10, startedAt: "2026-05-13T11:00:00Z" },
+        { id: "done-2", status: "completed", observationCount: 10, startedAt: "2026-05-13T10:00:00Z" },
+      ],
+      memories: [],
+      graphStats: null,
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+    };
+
+    sandbox.renderDashboard();
+
+    const html = getElement("view-dashboard").innerHTML;
+    expect(html).toContain("Token Savings");
+    expect(html).toContain(">17%<");
+    expect(html).toContain("~400 tokens");
+  });
+
+  it("debounces dashboard websocket refreshes without blanking rendered content", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    const timers: Array<() => void> = [];
+    let loadCount = 0;
+
+    sandbox.setTimeout = (fn: () => void) => {
+      timers.push(fn);
+      return timers.length;
+    };
+    sandbox.clearTimeout = () => {};
+    sandbox.fetch = async () => ({ ok: true, json: async () => ({}) });
+    sandbox.state.activeTab = "dashboard";
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessions: [{ id: "active-1", status: "active", observationCount: 3, startedAt: "2026-05-13T12:00:00Z" }],
+      memories: [],
+      graphStats: null,
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+    };
+
+    const originalLoadDashboard = sandbox.loadDashboard;
+    sandbox.loadDashboard = function(...args: unknown[]) {
+      loadCount++;
+      return originalLoadDashboard.apply(this, args);
+    };
+
+    sandbox.renderDashboard();
+    const before = getElement("view-dashboard").innerHTML;
+
+    sandbox.routeWsMessage({ observation: { id: "obs-1", timestamp: "2026-05-13T12:01:00Z", sessionId: "active-1" } });
+    sandbox.routeWsMessage({ observation: { id: "obs-2", timestamp: "2026-05-13T12:01:01Z", sessionId: "active-1" } });
+
+    expect(loadCount).toBe(0);
+    expect(timers).toHaveLength(1);
+    expect(getElement("view-dashboard").innerHTML).toBe(before);
+
+    timers[0]!();
+
+    expect(loadCount).toBe(1);
+  });
+
+  it("opens the root websocket and sends a stream join instead of trying the direct stream URL first", () => {
+    const { sandbox } = loadViewerSandbox();
+    const sockets: Array<{ url: string; sent: string[]; readyState: number; __direct?: boolean; onopen?: () => void }> = [];
+    sandbox.WebSocket = function WebSocket(url: string) {
+      const socket = {
+        url,
+        sent: [] as string[],
+        readyState: 1,
+        send(payload: string) {
+          this.sent.push(payload);
+        },
+        close() {},
+      };
+      sockets.push(socket);
+      return socket;
+    };
+    sandbox.WebSocket.OPEN = 1;
+    sandbox.WebSocket.CONNECTING = 0;
+
+    sandbox.connectWs();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].url).toBe("ws://localhost:3112");
+
+    sockets[0].onopen!();
+
+    expect(sockets[0].sent).toHaveLength(1);
+    expect(JSON.parse(sockets[0].sent[0])).toMatchObject({
+      type: "join",
+      data: { streamName: "mem-live", groupId: "viewer" },
+    });
+  });
+
   it("does not throw when timeline and sessions tabs receive sessions missing ids", () => {
     const { sandbox, getElement } = loadViewerSandbox();
     const sessions = [{ status: "active", observationCount: 1, startedAt: "2026-05-13T12:00:00Z" }];
@@ -238,5 +340,81 @@ describe("viewer session rendering", () => {
     expect(tabButtons.length).toBeGreaterThan(0);
     expect(() => sandbox.switchTab("sessions")).not.toThrow();
     expect(tabButtons.some((button: any) => button.classList.contains("active"))).toBe(true);
+  });
+
+  it("loads timeline observations with server pagination", async () => {
+    const { sandbox } = loadViewerSandbox();
+    const requests: string[] = [];
+    sandbox.fetch = async (url: string) => {
+      requests.push(url);
+      return {
+        ok: true,
+        json: async () => ({
+          observations: [
+            {
+              id: "obs-1",
+              sessionId: "session-1",
+              timestamp: "2026-06-17T19:00:00.000Z",
+              type: "command_run",
+              title: "Bash",
+              importance: 4,
+            },
+          ],
+          total: 22382,
+          offset: 100,
+          limit: 50,
+          hasMore: true,
+        }),
+      };
+    };
+    sandbox.state.timeline.sessionId = "session-1";
+    sandbox.state.timeline.page = 2;
+    sandbox.state.timeline.pageSize = 50;
+
+    await sandbox.loadObservations();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain("/agentmemory/observations?sessionId=session-1&limit=50&offset=100");
+    expect(sandbox.state.timeline.total).toBe(22382);
+    expect(sandbox.state.timeline.hasMore).toBe(true);
+  });
+
+  it("prepends live timeline observations only on page 0 and trims to page size", () => {
+    const { sandbox } = loadViewerSandbox();
+    sandbox.state.activeTab = "timeline";
+    sandbox.state.timeline.loaded = true;
+    sandbox.state.timeline.sessionId = "session-1";
+    sandbox.state.timeline.page = 0;
+    sandbox.state.timeline.pageSize = 2;
+    sandbox.state.timeline.total = 2;
+    sandbox.state.timeline.observations = [
+      { id: "obs-2", sessionId: "session-1", timestamp: "2026-06-17T19:02:00.000Z", title: "two", type: "command_run", importance: 4 },
+      { id: "obs-1", sessionId: "session-1", timestamp: "2026-06-17T19:01:00.000Z", title: "one", type: "command_run", importance: 4 },
+    ];
+
+    sandbox.routeWsMessage({
+      observation: { id: "obs-3", sessionId: "session-1", timestamp: "2026-06-17T19:03:00.000Z", title: "three", type: "command_run", importance: 4 },
+    });
+
+    expect(sandbox.state.timeline.total).toBe(3);
+    expect(sandbox.state.timeline.observations.map((o: any) => o.id)).toEqual(["obs-3", "obs-2"]);
+  });
+
+  it("refetches instead of mutating in-place on later timeline pages", () => {
+    const { sandbox } = loadViewerSandbox();
+    const loads: Array<{ page: number }> = [];
+    sandbox.state.activeTab = "timeline";
+    sandbox.state.timeline.loaded = true;
+    sandbox.state.timeline.sessionId = "session-1";
+    sandbox.state.timeline.page = 2;
+    sandbox.loadObservations = () => {
+      loads.push({ page: sandbox.state.timeline.page });
+    };
+
+    sandbox.routeWsMessage({
+      observation: { id: "obs-9", sessionId: "session-1", timestamp: "2026-06-17T19:09:00.000Z", title: "nine", type: "command_run", importance: 4 },
+    });
+
+    expect(loads).toEqual([{ page: 2 }]);
   });
 });

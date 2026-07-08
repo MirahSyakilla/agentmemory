@@ -20,7 +20,7 @@ let sandbox: string;
 function ctx(overrides: Partial<RemoveContext> = {}): RemoveContext {
   return {
     home: sandbox,
-    pinnedVersion: "0.11.2",
+    pinnedVersion: "0.11.3",
     localBinIiiVersion: null,
     connectManifest: null,
     ...overrides,
@@ -123,7 +123,7 @@ describe("buildRemovePlan", () => {
   it("local-bin/iii is auto-fixable when version matches pinned", () => {
     touch(".local/bin/iii", "fakebin");
     const plan = buildRemovePlan(
-      ctx({ localBinIiiVersion: "0.11.2" }),
+      ctx({ localBinIiiVersion: "0.11.3" }),
       { force: false, keepData: false },
     );
     const item = plan.find((p) => p.id === "legacy-local-bin-iii")!;

@@ -277,15 +277,34 @@ function mergeNode(
   obsIds: string[],
   capturedAt: string,
 ): GraphNode {
+  const sourceObservationIds = [
+    ...new Set([
+      ...existing.sourceObservationIds,
+      ...incoming.sourceObservationIds,
+      ...obsIds,
+    ]),
+  ];
+  const sessionByObservation = new Map<string, string>();
+  if (existing.sourceSessionIds?.length === existing.sourceObservationIds.length) {
+    existing.sourceObservationIds.forEach((obsId, idx) => {
+      const sessionId = existing.sourceSessionIds?.[idx];
+      if (sessionId) sessionByObservation.set(obsId, sessionId);
+    });
+  }
+  if (incoming.sourceSessionIds?.length === incoming.sourceObservationIds.length) {
+    incoming.sourceObservationIds.forEach((obsId, idx) => {
+      const sessionId = incoming.sourceSessionIds?.[idx];
+      if (sessionId) sessionByObservation.set(obsId, sessionId);
+    });
+  }
+  const sourceSessionIds = sourceObservationIds.map(
+    (obsId) => sessionByObservation.get(obsId) ?? "",
+  );
+
   return {
     ...existing,
-    sourceObservationIds: [
-      ...new Set([
-        ...existing.sourceObservationIds,
-        ...incoming.sourceObservationIds,
-        ...obsIds,
-      ]),
-    ],
+    sourceObservationIds,
+    ...(sourceSessionIds.some(Boolean) && { sourceSessionIds }),
     properties: { ...existing.properties, ...incoming.properties },
     updatedAt: capturedAt,
   };
@@ -378,6 +397,7 @@ function parseAttrs(raw: string): Record<string, string> {
 function parseGraphXml(
   xml: string,
   observationIds: string[],
+  sessionIds: string[] = [],
 ): {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -411,6 +431,7 @@ function parseGraphXml(
       name,
       properties,
       sourceObservationIds: observationIds,
+      sourceSessionIds: sessionIds,
       createdAt: now,
     });
   };
@@ -478,7 +499,8 @@ export function registerGraphFunction(
         );
 
         const obsIds = data.observations.map((o) => o.id);
-        const { nodes, edges } = parseGraphXml(response, obsIds);
+        const sessionIds = data.observations.map((o) => o.sessionId);
+        const { nodes, edges } = parseGraphXml(response, obsIds, sessionIds);
 
         // #814 v2: targeted name-index lookups replace the O(n) scan
         // over `kv.list<GraphNode>(KV.graphNodes)`. At 75K nodes the

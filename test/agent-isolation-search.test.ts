@@ -22,10 +22,14 @@ const configState = {
   isolated: false,
 };
 
-vi.mock("../src/config.js", () => ({
-  getAgentId: () => configState.agentId,
-  isAgentScopeIsolated: () => configState.isolated,
-}));
+vi.mock("../src/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config.js")>();
+  return {
+    ...actual,
+    getAgentId: () => configState.agentId,
+    isAgentScopeIsolated: () => configState.isolated,
+  };
+});
 
 import {
   registerSearchFunction,

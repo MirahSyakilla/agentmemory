@@ -597,15 +597,15 @@ npm install && npm run build && npm start
 
 Это поднимает agentmemory с локальным `iii-engine`, если `iii` уже установлен, либо откатывается к Docker Compose, если есть Docker. REST, стримы и просмотрщик по умолчанию слушают на `127.0.0.1`.
 
-Установите `iii-engine` вручную. **agentmemory сейчас зафиксирован на `iii-engine` `v0.11.2`** — `v0.11.6` вводит новую модель «всё через `iii worker add` в sandbox», под которую agentmemory ещё не отрефакторен. Закрепление снимется, как только рефакторинг будет завершён. Переопределите через `AGENTMEMORY_III_VERSION=<version>`, если вы вручную перешли на sandbox-модель.
+Установите `iii-engine` вручную. **agentmemory сейчас зафиксирован на `iii-engine` `v0.11.3`** — `v0.11.6` вводит новую модель «всё через `iii worker add` в sandbox», под которую agentmemory ещё не отрефакторен. Закрепление снимется, как только рефакторинг будет завершён. Переопределите через `AGENTMEMORY_III_VERSION=<version>`, если вы вручную перешли на sandbox-модель.
 
-- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.2/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
+- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.3/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
 - **macOS x64:** замените `aarch64-apple-darwin` на `x86_64-apple-darwin`
 - **Linux x64:** замените на `x86_64-unknown-linux-gnu`
 - **Linux arm64:** замените на `aarch64-unknown-linux-gnu`
-- **Windows:** скачайте `iii-x86_64-pc-windows-msvc.zip` из [iii-hq/iii releases v0.11.2](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2), распакуйте `iii.exe`, добавьте в PATH
+- **Windows:** скачайте `iii-x86_64-pc-windows-msvc.zip` из [iii-hq/iii releases v0.11.3](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3), распакуйте `iii.exe`, добавьте в PATH
 
-Либо используйте Docker (входящий в комплект `docker-compose.yml` тянет `iiidev/iii:0.11.2`). Полная документация: [iii.dev/docs](https://iii.dev/docs).
+Либо используйте Docker (входящий в комплект `docker-compose.yml` тянет `iiidev/iii:0.11.3`). Полная документация: [iii.dev/docs](https://iii.dev/docs).
 
 ### Windows
 
@@ -614,8 +614,8 @@ agentmemory работает на Windows 10/11, но одного Node.js-па�
 **Вариант A — Готовый Windows-бинарь (рекомендуется):**
 
 ```powershell
-# 1. Open https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2 in your browser
-#    (we pin to v0.11.2 until agentmemory refactors for the new sandbox
+# 1. Open https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3 in your browser
+#    (we pin to v0.11.3 until agentmemory refactors for the new sandbox
 #     model that engine v0.11.6+ requires)
 # 2. Download iii-x86_64-pc-windows-msvc.zip
 #    (or iii-aarch64-pc-windows-msvc.zip if you're on an ARM machine)
@@ -624,7 +624,7 @@ agentmemory работает на Windows 10/11, но одного Node.js-па�
 #    (agentmemory checks that location automatically)
 # 4. Verify:
 iii --version
-# Should print: 0.11.2
+# Should print: 0.11.3
 
 # 5. Then run agentmemory as usual:
 npx -y @agentmemory/agentmemory

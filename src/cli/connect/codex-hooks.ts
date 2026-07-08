@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -69,12 +69,28 @@ export function buildMergedHooks(
   const bundledManifestPath = join(pluginRoot, "hooks", manifestFile);
   const ours = JSON.parse(readFileSync(bundledManifestPath, "utf-8")) as HookManifest;
   const scriptsDir = join(pluginRoot, "scripts");
+  const knownScriptNames = new Set<string>();
+  for (const entries of Object.values(ours.hooks)) {
+    for (const entry of entries) {
+      for (const handler of entry.hooks) {
+        const resolved = handler.command.replace(
+          /\$\{CLAUDE_PLUGIN_ROOT\}/g,
+          pluginRoot,
+        );
+        knownScriptNames.add(
+          basename(normalizePathForCommandMatch(resolved)).toLowerCase(),
+        );
+      }
+    }
+  }
 
   const out: HookManifest = { hooks: {} };
 
   if (existing?.hooks) {
     for (const [event, entries] of Object.entries(existing.hooks)) {
-      const kept = entries.filter((entry) => !isAgentmemoryEntry(entry, scriptsDir));
+      const kept = entries.filter(
+        (entry) => !isAgentmemoryEntry(entry, scriptsDir, knownScriptNames),
+      );
       if (kept.length > 0) out.hooks[event] = kept;
     }
   }
@@ -96,11 +112,21 @@ export function buildMergedHooks(
   return out;
 }
 
-function isAgentmemoryEntry(entry: HookEntry, scriptsDir: string): boolean {
-  const normalizedScriptsDir = normalizePathForCommandMatch(scriptsDir);
-  return entry.hooks.some((handler) =>
-    normalizePathForCommandMatch(handler.command).includes(normalizedScriptsDir),
-  );
+function isAgentmemoryEntry(
+  entry: HookEntry,
+  scriptsDir: string,
+  knownScriptNames: Set<string>,
+): boolean {
+  const normalizedScriptsDir = normalizePathForCommandMatch(scriptsDir).toLowerCase();
+  return entry.hooks.some((handler) => {
+    const normalized = normalizePathForCommandMatch(handler.command).toLowerCase();
+    if (normalized.includes(normalizedScriptsDir)) return true;
+    if (!normalized.includes("agentmemory")) return false;
+    if (!normalized.includes("/plugin/scripts/")) return false;
+    return Array.from(knownScriptNames).some((scriptName) =>
+      normalized.includes(`/plugin/scripts/${scriptName}`),
+    );
+  });
 }
 
 function normalizePathForCommandMatch(value: string): string {

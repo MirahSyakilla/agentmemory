@@ -7,6 +7,7 @@ dist/
 !.env.example
 
 *.log
+core.*
 .DS_Store
 .claude/
 
@@ -18,6 +19,10 @@ data/
 data-*/
 agentmemory-debug/
 .gstack/
+preferences.json
+standalone.json
+backups/
+bin/
 
 # Lock files — never commit (see feedback_no_lockfiles memory)
 package-lock.json

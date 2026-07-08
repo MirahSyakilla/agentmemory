@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
-import type { CompressedObservation, EmbeddingProvider } from "../src/types.js";
+import type { CompressedObservation, EmbeddingProvider, GraphNode } from "../src/types.js";
 
 function makeObs(
   overrides: Partial<CompressedObservation> = {},
@@ -46,10 +46,20 @@ function mockKV() {
 describe("HybridSearch", () => {
   let bm25: SearchIndex;
   let kv: ReturnType<typeof mockKV>;
+  const originalSmartSearchGraph = process.env["AGENTMEMORY_SMART_SEARCH_GRAPH"];
 
   beforeEach(() => {
     bm25 = new SearchIndex();
     kv = mockKV();
+    process.env["AGENTMEMORY_SMART_SEARCH_GRAPH"] = "true";
+  });
+
+  afterEach(() => {
+    if (originalSmartSearchGraph === undefined) {
+      delete process.env["AGENTMEMORY_SMART_SEARCH_GRAPH"];
+    } else {
+      process.env["AGENTMEMORY_SMART_SEARCH_GRAPH"] = originalSmartSearchGraph;
+    }
   });
 
   it("returns BM25-only results when no vector index is provided", async () => {
@@ -179,5 +189,41 @@ describe("HybridSearch", () => {
     expect(results[0].observation.id).toBe("mem_abc");
     expect(results[0].observation.narrative).toBe("Test memory for search");
     expect(results[0].observation.concepts).toEqual(["test", "search"]);
+  });
+
+  it("enriches graph-only results by resolving their observation session (#925)", async () => {
+    const obs = makeObs({
+      id: "obs_graph",
+      sessionId: "ses_graph",
+      title: "Graph-only retrieval target",
+      narrative: "A React graph node points at this observation",
+      concepts: ["react"],
+    });
+    await kv.set("mem:sessions", "ses_graph", {
+      id: "ses_graph",
+      project: "p",
+      cwd: "/repo",
+      startedAt: new Date().toISOString(),
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_graph", "obs_graph", obs);
+    const node: GraphNode = {
+      id: "gn_react",
+      type: "library",
+      name: "React",
+      properties: {},
+      sourceObservationIds: ["obs_graph"],
+      createdAt: new Date().toISOString(),
+    };
+    await kv.set("mem:graph:nodes", node.id, node);
+
+    const hybrid = new HybridSearch(bm25, null, null, kv as never);
+    const results = await hybrid.search("React", 5);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].observation.id).toBe("obs_graph");
+    expect(results[0].sessionId).toBe("ses_graph");
+    expect(results[0].graphScore).toBeGreaterThan(0);
   });
 });

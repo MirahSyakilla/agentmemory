@@ -15,6 +15,7 @@ vi.mock("../src/functions/search.js", () => ({
   getSearchIndex: () => ({
     add: vi.fn(),
   }),
+  lexicalIndexAdd: vi.fn().mockResolvedValue(undefined),
   vectorIndexAddGuarded: vi.fn().mockResolvedValue(false),
 }));
 

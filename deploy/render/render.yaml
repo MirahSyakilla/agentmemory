@@ -17,6 +17,6 @@ services:
       - key: AGENTMEMORY_VERSION
         value: "0.9.12"
       - key: III_VERSION
-        value: "0.11.2"
+        value: "0.11.3"
       - key: III_SDK_VERSION
-        value: "0.11.2"
+        value: "0.11.3"

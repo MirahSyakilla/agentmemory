@@ -94,6 +94,59 @@ describe("import-jsonl re-key on parsed.sessionId (#775)", () => {
     writeFileSync(join(dir, `${sessionId}.jsonl`), lines.join("\n") + "\n");
   }
 
+  function writeCodexFixture(sessionId: string) {
+    const dir = join(tmpRoot, "codex");
+    rmSync(dir, { recursive: true, force: true });
+    require("node:fs").mkdirSync(dir, { recursive: true });
+    const lines = [
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: sessionId,
+          timestamp: "2026-06-01T10:00:00.000Z",
+          cwd: "/home/meow/agentmemory",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "Add Codex import support" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "call_1",
+          arguments: JSON.stringify({
+            cmd: "rg -n replay src/replay/jsonl-parser.ts",
+            workdir: "/home/meow/agentmemory",
+          }),
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: "src/replay/jsonl-parser.ts:1:import",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-01T10:00:04.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: "Done. Make sure replay import handles Codex event_msg.",
+        },
+      }),
+    ];
+    writeFileSync(join(dir, `${sessionId}.jsonl`), lines.join("\n") + "\n");
+  }
+
   it("re-imports a session whose stored row is missing the `id` field without aborting the batch", async () => {
     writeFixture("sess-no-id");
     const kv = mockKV();
@@ -150,5 +203,80 @@ describe("import-jsonl re-key on parsed.sessionId (#775)", () => {
       .getSetCalls()
       .filter((c) => c.scope === KV.sessions && c.key === "sess-fresh");
     expect(sessionWrites.length).toBe(1);
+  });
+
+  it("imports Codex JSONL into observations, action, crystal, and lesson scopes", async () => {
+    writeCodexFixture("codex-session-1");
+    const kv = mockKV();
+    const sdk = mockSdk(kv);
+    registerReplayFunctions(sdk, kv as never);
+
+    const result = (await sdk.trigger("mem::replay::import-jsonl", {
+      path: tmpRoot,
+    })) as { success: boolean; imported?: number; observations?: number };
+
+    expect(result.success).toBe(true);
+    expect(result.imported).toBe(1);
+    expect(result.observations).toBeGreaterThan(0);
+
+    const actions = await kv.list<any>(KV.actions);
+    expect(actions).toHaveLength(1);
+    expect(actions[0].status).toBe("done");
+    expect(actions[0].tags).toContain("codex-import");
+
+    const crystals = await kv.list<any>(KV.crystals);
+    expect(crystals).toHaveLength(1);
+    expect(crystals[0].sourceActionIds).toContain(actions[0].id);
+
+    const lessons = await kv.list<any>(KV.lessons);
+    expect(lessons.length).toBeGreaterThan(0);
+  });
+
+  it("refreshes imported session metadata and replaces stale summaries with full deterministic coverage", async () => {
+    writeCodexFixture("codex-session-2");
+    const kv = mockKV();
+    const sdk = mockSdk(kv);
+    registerReplayFunctions(sdk, kv as never);
+
+    await kv.set(KV.sessions, "codex-session-2", {
+      id: "codex-session-2",
+      project: "agentmemory",
+      cwd: "/home/meow/agentmemory",
+      startedAt: "2026-06-01T10:05:00.000Z",
+      endedAt: "2026-06-01T10:05:30.000Z",
+      status: "completed",
+      observationCount: 1,
+      tags: [],
+      firstPrompt: "later prompt",
+    });
+    await kv.set(KV.summaries, "codex-session-2", {
+      sessionId: "codex-session-2",
+      project: "agentmemory",
+      createdAt: "2026-06-01T10:05:30.000Z",
+      title: "stale summary",
+      narrative: "This summary only covered the native capture.",
+      keyDecisions: ["stale decision"],
+      filesModified: ["src/stale.ts"],
+      concepts: ["stale"],
+      observationCount: 1,
+    });
+
+    const result = (await sdk.trigger("mem::replay::import-jsonl", {
+      path: tmpRoot,
+    })) as { success: boolean; imported?: number };
+
+    expect(result.success).toBe(true);
+    expect(result.imported).toBe(1);
+
+    const session = await kv.get<any>(KV.sessions, "codex-session-2");
+    expect(session.startedAt).toBe("2026-06-01T10:00:00.000Z");
+    expect(session.tags).toContain("jsonl-import");
+    expect(session.tags).toContain("codex-import");
+    expect(session.firstPrompt).toBe("Add Codex import support");
+
+    const summary = await kv.get<any>(KV.summaries, "codex-session-2");
+    expect(summary.title).not.toBe("stale summary");
+    expect(summary.observationCount).toBeGreaterThan(1);
+    expect(summary.narrative).toContain("Session captured");
   });
 });

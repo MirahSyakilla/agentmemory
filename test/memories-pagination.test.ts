@@ -25,6 +25,11 @@ describe("memories + export pagination (#544)", () => {
     expect(api).toMatch(/Math\.min\(parsedLimit,\s*5000\)/);
   });
 
+  it("api::memories accepts project and applies it before count/pagination", () => {
+    expect(api).toMatch(/query_params\?\.\["project"\]/);
+    expect(api).toMatch(/filtered\s*=\s*filtered\.filter\(\(m\)\s*=>\s*m\.project\s*===\s*project\)/);
+  });
+
   it("api::export passes through maxSessions + offset query params", () => {
     expect(api).toMatch(/query_params\?\.\["maxSessions"\]/);
     expect(api).toMatch(/query_params\?\.\["offset"\]/);

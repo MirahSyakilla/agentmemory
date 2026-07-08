@@ -17,10 +17,14 @@ vi.mock("../src/functions/access-tracker.js", () => ({
   deleteAccessLog: vi.fn(),
 }));
 
-vi.mock("../src/config.js", () => ({
-  getAgentId: () => undefined,
-  isAgentScopeIsolated: () => false,
-}));
+vi.mock("../src/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config.js")>();
+  return {
+    ...actual,
+    getAgentId: () => undefined,
+    isAgentScopeIsolated: () => false,
+  };
+});
 
 import { registerRememberFunction } from "../src/functions/remember.js";
 import { registerSearchFunction, getSearchIndex, setIndexPersistence } from "../src/functions/search.js";

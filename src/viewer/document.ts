@@ -6,9 +6,11 @@ import {
   createViewerNonce,
   buildViewerCsp,
 } from "../auth.js";
+import { getHealthMemoryRssFloorMb } from "../config.js";
 import { VERSION } from "../version.js";
 
 const VIEWER_VERSION_PLACEHOLDER = "__AGENTMEMORY_VERSION__";
+const VIEWER_RSS_GAUGE_MAX_MB_PLACEHOLDER = "__AGENTMEMORY_RSS_GAUGE_MAX_MB__";
 
 function loadViewerTemplate(): string | null {
   const base = dirname(fileURLToPath(import.meta.url));
@@ -36,6 +38,10 @@ export function renderViewerDocument():
   const nonce = createViewerNonce();
   const html = template
     .replaceAll(VIEWER_NONCE_PLACEHOLDER, nonce)
+    .replaceAll(
+      VIEWER_RSS_GAUGE_MAX_MB_PLACEHOLDER,
+      String(getHealthMemoryRssFloorMb()),
+    )
     .replaceAll(VIEWER_VERSION_PLACEHOLDER, VERSION);
   return {
     found: true,

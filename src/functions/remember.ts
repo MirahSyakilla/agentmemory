@@ -6,7 +6,13 @@ import { withKeyedLock } from "../state/keyed-mutex.js";
 import { memoryToObservation } from "../state/memory-utils.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { recordAudit } from "./audit.js";
-import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove, flushIndexSave } from "./search.js";
+import {
+  lexicalIndexAdd,
+  lexicalIndexRemove,
+  vectorIndexAddGuarded,
+  vectorIndexRemove,
+  flushIndexSave,
+} from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 
@@ -133,7 +139,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         // an indexing failure doesn't block the save itself — the
         // restart-time rebuild will pick the memory up either way.
         try {
-          getSearchIndex().add(memoryToObservation(memory));
+          await lexicalIndexAdd(memoryToObservation(memory));
         } catch (err) {
           logger.warn("Failed to index saved memory into BM25", {
             memId: memory.id,
@@ -186,8 +192,8 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           await decrementImageRef(kv, sdk, mem.imageRef);
         }
         await deleteAccessLog(kv, data.memoryId);
-        getSearchIndex().remove(data.memoryId);
-        vectorIndexRemove(data.memoryId);
+        await lexicalIndexRemove(data.memoryId);
+        await vectorIndexRemove(data.memoryId);
         deletedMemoryIds.push(data.memoryId);
         deleted++;
       }
@@ -207,8 +213,8 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           if (obs?.imageRef && obs.imageRef !== obs.imageData) {
             await decrementImageRef(kv, sdk, obs.imageRef);
           }
-          getSearchIndex().remove(obsId);
-          vectorIndexRemove(obsId);
+          await lexicalIndexRemove(obsId);
+          await vectorIndexRemove(obsId);
           deletedObservationIds.push(obsId);
           deleted++;
         }
@@ -228,8 +234,8 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           if (obs.imageRef && obs.imageRef !== obs.imageData) {
             await decrementImageRef(kv, sdk, obs.imageRef);
           }
-          getSearchIndex().remove(obs.id);
-          vectorIndexRemove(obs.id);
+          await lexicalIndexRemove(obs.id);
+          await vectorIndexRemove(obs.id);
           deletedObservationIds.push(obs.id);
           deleted++;
         }

@@ -344,3 +344,133 @@ describe("OpenAIProvider thinking-model fallback (#627)", () => {
   });
 });
 
+describe("OpenAIProvider Responses API transport", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("uses /v1/responses with instructions, input, and max_output_tokens", async () => {
+    let capturedUrl = "";
+    let capturedBody: Record<string, unknown> = {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = String(url);
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ output_text: "ok" }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "gpt-compatible",
+      1024,
+      "https://proxy.example.com",
+    );
+
+    await expect(provider.compress("system", "user")).resolves.toBe("ok");
+    expect(capturedUrl).toBe("https://proxy.example.com/v1/responses");
+    expect(capturedBody).toMatchObject({
+      model: "gpt-compatible",
+      instructions: "system",
+      input: "user",
+      max_output_tokens: 1024,
+      stream: false,
+    });
+    expect(capturedBody).not.toHaveProperty("messages");
+    expect(capturedBody).not.toHaveProperty("max_tokens");
+  });
+
+  it("parses Responses output message content", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            output: [
+              {
+                type: "message",
+                content: [{ type: "output_text", text: "nested ok" }],
+              },
+            ],
+          }),
+          { status: 200 },
+        )) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "gpt-compatible",
+      1024,
+      "https://proxy.example.com",
+    );
+
+    await expect(provider.summarize("system", "user")).resolves.toBe(
+      "nested ok",
+    );
+  });
+
+  it("retries Responses without max_output_tokens when a proxy rejects that field", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (_url: string | URL | Request, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (bodies.length === 1) {
+          return new Response(
+            JSON.stringify({
+              error: { message: "Unsupported parameter: max_output_tokens" },
+            }),
+            { status: 400 },
+          );
+        }
+        return new Response(JSON.stringify({ output_text: "ok" }), {
+          status: 200,
+        });
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "gpt-compatible",
+      1024,
+      "https://proxy.example.com",
+    );
+
+    await expect(provider.summarize("system", "user")).resolves.toBe("ok");
+    expect(bodies[0].max_output_tokens).toBe(1024);
+    expect(bodies[1]).not.toHaveProperty("max_output_tokens");
+  });
+
+  it("falls back to chat completions only when /responses is unavailable", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        if (urls.length === 1) {
+          return new Response(
+            JSON.stringify({ error: { message: "responses route not found" } }),
+            { status: 404 },
+          );
+        }
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: "chat ok" } }] }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+
+    const provider = new OpenAIProvider(
+      "test-key",
+      "gpt-compatible",
+      1024,
+      "https://proxy.example.com",
+    );
+
+    await expect(provider.compress("system", "user")).resolves.toBe("chat ok");
+    expect(urls).toEqual([
+      "https://proxy.example.com/v1/responses",
+      "https://proxy.example.com/v1/chat/completions",
+    ]);
+  });
+});

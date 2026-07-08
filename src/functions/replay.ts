@@ -3,11 +3,13 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import type { ISdk } from "iii-sdk";
 import type {
+  Action,
   CompressedObservation,
   Crystal,
   Lesson,
   RawObservation,
   Session,
+  SessionSummary,
 } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId, fingerprintId } from "../state/schema.js";
@@ -15,8 +17,9 @@ import { parseJsonlText } from "../replay/jsonl-parser.js";
 import { projectTimeline, type Timeline } from "../replay/timeline.js";
 import { safeAudit } from "./audit.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
-import { getSearchIndex } from "./search.js";
+import { lexicalIndexAdd } from "./search.js";
 import { logger } from "../logger.js";
+import { buildDeterministicSummary } from "./summarize.js";
 
 export const MAX_FILES_DEFAULT = 200;
 export const MAX_FILES_UPPER_BOUND = 1000;
@@ -73,6 +76,7 @@ async function deriveCrystalAndLessons(
   rawObs: RawObservation[],
   compressed: CompressedObservation[],
   firstPrompt: string | undefined,
+  sourceActionIds: string[] = [],
 ): Promise<void> {
   if (rawObs.length === 0) return;
   const createdAt = new Date().toISOString();
@@ -172,13 +176,16 @@ async function deriveCrystalAndLessons(
 
   try {
     const existingCrystal = await kv.get<Crystal>(KV.crystals, crystalId);
+    const mergedActionIds = [
+      ...new Set([...(existingCrystal?.sourceActionIds ?? []), ...sourceActionIds]),
+    ];
     const crystal: Crystal = {
       id: crystalId,
       narrative: narrativePreview || `Session ${sessionId.slice(0, 12)} (${rawObs.length} observations)`,
       keyOutcomes: Array.from(tools).slice(0, 8),
       filesAffected: Array.from(files).slice(0, 20),
       lessons: lessonIds,
-      sourceActionIds: existingCrystal?.sourceActionIds ?? [],
+      sourceActionIds: mergedActionIds,
       sessionId,
       project,
       createdAt: existingCrystal?.createdAt ?? createdAt,
@@ -201,6 +208,101 @@ async function loadObservations(
     KV.observations(sessionId),
   );
   return rows.map((r) => (isRawShape(r) ? r : rawFromCompressed(r as CompressedObservation)));
+}
+
+function compactPrompt(prompt: string | undefined, fallback: string): string {
+  if (!prompt) return fallback;
+  const marker = "## My request for Codex:";
+  const markerIdx = prompt.lastIndexOf(marker);
+  const source = markerIdx >= 0 ? prompt.slice(markerIdx + marker.length) : prompt;
+  return source.replace(/\s+/g, " ").trim().slice(0, 140) || fallback;
+}
+
+function lastAssistantResponse(rawObs: RawObservation[]): string | undefined {
+  for (let i = rawObs.length - 1; i >= 0; i--) {
+    const text = rawObs[i].assistantResponse;
+    if (typeof text === "string" && text.trim().length > 0) {
+      return text.replace(/\s+/g, " ").trim().slice(0, 500);
+    }
+  }
+  return undefined;
+}
+
+function earlierTimestamp(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a <= b ? a : b;
+}
+
+function laterTimestamp(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a >= b ? a : b;
+}
+
+async function upsertImportedAction(
+  kv: StateKV,
+  sessionId: string,
+  project: string,
+  parsedSource: string | undefined,
+  rawObs: RawObservation[],
+  compressed: CompressedObservation[],
+  firstPrompt: string | undefined,
+): Promise<string> {
+  const actionId = fingerprintId("act", `jsonl-import:${sessionId}`);
+  const existing = await kv.get<Action>(KV.actions, actionId).catch(() => null);
+  const createdAt = existing?.createdAt ?? rawObs[0]?.timestamp ?? new Date().toISOString();
+  const updatedAt = rawObs[rawObs.length - 1]?.timestamp ?? createdAt;
+  const sourceObservationIds = rawObs
+    .filter((o) => o.hookType === "prompt_submit" || o.hookType === "pre_tool_use")
+    .slice(0, 50)
+    .map((o) => o.id);
+  const toolNames = [
+    ...new Set(
+      compressed
+        .filter((c) => c.type !== "conversation")
+        .map((c) => c.title)
+        .filter(Boolean),
+    ),
+  ].slice(0, 12);
+  const action: Action = {
+    id: actionId,
+    title: compactPrompt(firstPrompt, `Imported session ${sessionId.slice(0, 12)}`),
+    description: `Imported ${rawObs.length} replay observation(s) from ${parsedSource ?? "jsonl"} transcript.`,
+    status: "done",
+    priority: existing?.priority ?? 5,
+    createdAt,
+    updatedAt,
+    createdBy: existing?.createdBy ?? "replay-import",
+    assignedTo: existing?.assignedTo,
+    project,
+    tags: [
+      ...new Set([
+        ...(existing?.tags ?? []),
+        "jsonl-import",
+        parsedSource ? `${parsedSource}-import` : "transcript-import",
+      ]),
+    ],
+    sourceObservationIds,
+    sourceMemoryIds: existing?.sourceMemoryIds ?? [],
+    result: lastAssistantResponse(rawObs) ?? existing?.result,
+    metadata: {
+      ...(existing?.metadata ?? {}),
+      source: "jsonl-import",
+      transcriptSource: parsedSource ?? "unknown",
+      sessionId,
+      observationCount: rawObs.length,
+      tools: toolNames,
+    },
+    crystallizedInto: existing?.crystallizedInto,
+  };
+  await kv.set(KV.actions, actionId, action);
+  await safeAudit(kv, existing ? "action_update" : "action_create", "mem::replay::import-jsonl", [actionId], {
+    source: "jsonl-import",
+    sessionId,
+    project,
+  });
+  return actionId;
 }
 
 async function findJsonlFiles(
@@ -391,19 +493,44 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
           ? firstPromptObs.userPrompt.replace(/\s+/g, " ").trim().slice(0, 200)
           : undefined;
 
+        const existingObsRows = await kv
+          .list<{ id?: string }>(KV.observations(parsed.sessionId))
+          .catch(() => []);
+        const existingObsIds = new Set(
+          existingObsRows
+            .map((o) => o.id)
+            .filter((id): id is string => typeof id === "string" && id.length > 0),
+        );
+        const newObservations = parsed.observations.filter(
+          (o) => !existingObsIds.has(o.id),
+        ).length;
+
         const existing = await kv.get<Session>(KV.sessions, parsed.sessionId);
+        const importedStartedAt = parsed.startedAt;
         if (existing) {
-          existing.observationCount =
-            (existing.observationCount || 0) + parsed.observations.length;
-          if (parsed.endedAt > (existing.endedAt || "")) {
-            existing.endedAt = parsed.endedAt;
-          }
+          const startedAt = earlierTimestamp(existing.startedAt, parsed.startedAt) || existing.startedAt;
+          const importedStartsEarlier =
+            !!importedStartedAt &&
+            (!existing.startedAt || importedStartedAt < existing.startedAt);
+          existing.startedAt = startedAt;
+          existing.observationCount = existingObsRows.length + newObservations;
+          existing.endedAt = laterTimestamp(existing.endedAt, parsed.endedAt);
           if (existing.status === "active") existing.status = "completed";
-          const existingTags = existing.tags || [];
-          if (!existingTags.includes("jsonl-import")) {
-            existing.tags = [...existingTags, "jsonl-import"];
+          if (!existing.project || existing.project === "unknown") {
+            existing.project = parsed.project;
           }
-          if (!existing.firstPrompt && firstPrompt) {
+          if (!existing.cwd && parsed.cwd) {
+            existing.cwd = parsed.cwd;
+          }
+          const existingTags = existing.tags || [];
+          existing.tags = [
+            ...new Set([
+              ...existingTags,
+              "jsonl-import",
+              parsed.source ? `${parsed.source}-import` : "transcript-import",
+            ]),
+          ];
+          if ((!existing.firstPrompt && firstPrompt) || (importedStartsEarlier && firstPrompt)) {
             existing.firstPrompt = firstPrompt;
           }
           // #775: re-key on parsed.sessionId, not existing.id. Older
@@ -426,24 +553,36 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
             endedAt: parsed.endedAt,
             status: "completed",
             observationCount: parsed.observations.length,
-            tags: ["jsonl-import"],
+            tags: [
+              "jsonl-import",
+              parsed.source ? `${parsed.source}-import` : "transcript-import",
+            ],
             firstPrompt,
           };
           await kv.set(KV.sessions, session.id, session);
         }
 
-        const searchIndex = getSearchIndex();
         const compressed: CompressedObservation[] = [];
         await Promise.all(
           parsed.observations.map(async (obs) => {
             const synthetic = buildSyntheticCompression(obs);
             compressed.push(synthetic);
             await kv.set(KV.observations(parsed.sessionId), obs.id, synthetic);
-            searchIndex.add(synthetic);
+            await lexicalIndexAdd(synthetic);
           }),
         );
         observationCount += parsed.observations.length;
         sessionIds.push(parsed.sessionId);
+
+        const actionId = await upsertImportedAction(
+          kv,
+          parsed.sessionId,
+          parsed.project,
+          parsed.source,
+          parsed.observations,
+          compressed,
+          firstPrompt,
+        );
 
         await deriveCrystalAndLessons(
           kv,
@@ -452,7 +591,31 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
           parsed.observations,
           compressed,
           firstPrompt,
+          [actionId],
         );
+
+        const allCompressed = await kv.list<CompressedObservation>(
+          KV.observations(parsed.sessionId),
+        );
+        const currentSummary = await kv
+          .get<SessionSummary>(KV.summaries, parsed.sessionId)
+          .catch(() => null);
+        if (
+          !currentSummary ||
+          (currentSummary.observationCount || 0) < allCompressed.length
+        ) {
+          const refreshedSummary = buildDeterministicSummary(
+            allCompressed.filter((observation) => observation.title),
+            parsed.sessionId,
+            parsed.project,
+          );
+          await kv.set(KV.summaries, parsed.sessionId, refreshedSummary);
+          await safeAudit(kv, "compress", "mem::replay::import-jsonl", [parsed.sessionId], {
+            title: refreshedSummary.title,
+            observationCount: refreshedSummary.observationCount,
+            deterministic: true,
+          });
+        }
       }
 
       await safeAudit(kv, "import", "mem::replay::import-jsonl", sessionIds, {

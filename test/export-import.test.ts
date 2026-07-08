@@ -5,6 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerExportImportFunction } from "../src/functions/export-import.js";
+import { getSearchIndex, setEmbeddingProvider, setVectorIndex } from "../src/functions/search.js";
 import type {
   Session,
   CompressedObservation,
@@ -12,6 +13,7 @@ import type {
   SessionSummary,
   ExportData,
 } from "../src/types.js";
+import { memoryToObservation } from "../src/state/memory-utils.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -109,6 +111,9 @@ describe("Export/Import Functions", () => {
     sdk = mockSdk();
     kv = mockKV();
     registerExportImportFunction(sdk as never, kv as never);
+    getSearchIndex().clear();
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
 
     await kv.set("mem:sessions", "ses_1", testSession);
     await kv.set("mem:obs:ses_1", "obs_1", testObs);
@@ -199,6 +204,42 @@ describe("Export/Import Functions", () => {
 
     const oldSession = await kv.get("mem:sessions", "ses_1");
     expect(oldSession).toBeNull();
+  });
+
+  it("import with replace strategy rebuilds the search index from imported memories", async () => {
+    const staleMemory: Memory = {
+      ...testMemory,
+      id: "mem_stale",
+      title: "Stale auth pattern",
+      content: "Legacy memory that should be dropped from the index",
+    };
+    getSearchIndex().add(memoryToObservation(staleMemory));
+    expect(getSearchIndex().has("mem_stale")).toBe(true);
+
+    const freshMemory: Memory = {
+      ...testMemory,
+      id: "mem_fresh",
+      title: "Fresh auth pattern",
+      content: "Imported memory that should exist in the rebuilt index",
+    };
+    const exportData: ExportData = {
+      version: "0.3.0",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [freshMemory],
+      summaries: [],
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "replace",
+    })) as { success: boolean; memories: number };
+
+    expect(result.success).toBe(true);
+    expect(result.memories).toBe(1);
+    expect(getSearchIndex().has("mem_stale")).toBe(false);
+    expect(getSearchIndex().has("mem_fresh")).toBe(true);
   });
 
   it("export then import round-trip preserves data", async () => {

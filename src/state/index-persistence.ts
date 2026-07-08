@@ -25,8 +25,16 @@ type IndexShardManifest = {
 };
 
 type IndexPersistenceOptions = {
+  bm25MaxItems?: number;
+  maxBm25LoadChars?: number;
+  loadBm25?: boolean;
+  saveBm25?: boolean;
   shardChars?: number;
   createGeneration?: () => string;
+  vectorMaxItems?: number;
+  maxVectorLoadChars?: number;
+  loadVector?: boolean;
+  saveVector?: boolean;
 };
 
 function shardChars(options: IndexPersistenceOptions): number {
@@ -93,8 +101,10 @@ export class IndexPersistence {
       this.timer = null;
     }
     try {
-      await this.saveBm25Index(this.bm25.serialize());
-      if (this.vector) {
+      if (this.options.saveBm25 !== false) {
+        await this.saveBm25Index(this.bm25.serialize());
+      }
+      if (this.vector && this.options.saveVector !== false) {
         await this.saveVectorIndex(this.vector.serialize());
       }
     } catch (err) {
@@ -109,14 +119,16 @@ export class IndexPersistence {
     let bm25: SearchIndex | null = null;
     let vector: VectorIndex | null = null;
 
-    const bm25Data = await this.loadBm25Data();
+    const bm25Data =
+      this.options.loadBm25 !== false ? await this.loadBm25Data() : null;
     if (bm25Data && typeof bm25Data === "string") {
-      bm25 = SearchIndex.deserialize(bm25Data);
+      bm25 = SearchIndex.deserialize(bm25Data, this.options.bm25MaxItems);
     }
 
-    const vecData = await this.loadVectorData();
+    const vecData =
+      this.options.loadVector !== false ? await this.loadVectorData() : null;
     if (vecData && typeof vecData === "string") {
-      vector = VectorIndex.deserialize(vecData);
+      vector = VectorIndex.deserialize(vecData, this.options.vectorMaxItems);
     }
 
     return { bm25, vector };
@@ -339,17 +351,28 @@ export class IndexPersistence {
   }
 
   private async loadBm25Data(): Promise<string | null> {
-    return this.loadShardedData(BM25_KEY, BM25_MANIFEST_KEY, "BM25");
+    return this.loadShardedData(
+      BM25_KEY,
+      BM25_MANIFEST_KEY,
+      "BM25",
+      this.options.maxBm25LoadChars,
+    );
   }
 
   private async loadVectorData(): Promise<string | null> {
-    return this.loadShardedData(VECTOR_KEY, VECTOR_MANIFEST_KEY, "vector");
+    return this.loadShardedData(
+      VECTOR_KEY,
+      VECTOR_MANIFEST_KEY,
+      "vector",
+      this.options.maxVectorLoadChars,
+    );
   }
 
   private async loadShardedData(
     legacyKey: string,
     manifestKey: string,
     label: string,
+    maxManifestChars?: number,
   ): Promise<string | null> {
     const manifest = await this.readIndexValue<IndexShardManifest>(
       KV.bm25Index,
@@ -368,6 +391,20 @@ export class IndexPersistence {
       manifest.value != null &&
       typeof manifest.value === "object"
     ) {
+      const manifestChars = Number((manifest.value as { chars?: unknown }).chars);
+      if (
+        typeof maxManifestChars === "number" &&
+        Number.isFinite(maxManifestChars) &&
+        maxManifestChars >= 0 &&
+        Number.isFinite(manifestChars) &&
+        manifestChars > maxManifestChars
+      ) {
+        logger.warn(`index persistence: ${label} snapshot too large to load`, {
+          chars: manifestChars,
+          maxChars: maxManifestChars,
+        });
+        return null;
+      }
       return this.loadManifestData(manifest.value, label);
     }
 

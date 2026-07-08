@@ -49,6 +49,37 @@ describe("VectorIndex", () => {
     expect(results.length).toBe(3);
   });
 
+  it("evicts oldest vectors when max entries is reached", () => {
+    index = new VectorIndex(2);
+    index.add("obs_old", "ses_1", new Float32Array([1, 0, 0]));
+    index.add("obs_mid", "ses_1", new Float32Array([0, 1, 0]));
+    index.add("obs_new", "ses_1", new Float32Array([0, 0, 1]));
+
+    expect(index.size).toBe(2);
+    const ids = index
+      .search(new Float32Array([1, 1, 1]), 3)
+      .map((r) => r.obsId);
+    expect(ids).not.toContain("obs_old");
+    expect(ids).toContain("obs_mid");
+    expect(ids).toContain("obs_new");
+  });
+
+  it("treats re-added vectors as newest for eviction", () => {
+    index = new VectorIndex(2);
+    index.add("obs_a", "ses_1", new Float32Array([1, 0, 0]));
+    index.add("obs_b", "ses_1", new Float32Array([0, 1, 0]));
+    index.add("obs_a", "ses_1", new Float32Array([0, 0, 1]));
+    index.add("obs_c", "ses_1", new Float32Array([1, 1, 0]));
+
+    expect(index.size).toBe(2);
+    const ids = index
+      .search(new Float32Array([1, 1, 1]), 3)
+      .map((r) => r.obsId);
+    expect(ids).not.toContain("obs_b");
+    expect(ids).toContain("obs_a");
+    expect(ids).toContain("obs_c");
+  });
+
   it("clears all vectors", () => {
     index.add("obs_1", "ses_1", new Float32Array([0.1, 0.2, 0.3]));
     index.add("obs_2", "ses_1", new Float32Array([0.4, 0.5, 0.6]));

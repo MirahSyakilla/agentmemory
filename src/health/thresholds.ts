@@ -1,4 +1,5 @@
 import type { HealthSnapshot } from "../types.js";
+import { getHealthMemoryRssFloorBytes } from "../config.js";
 
 interface ThresholdConfig {
   eventLoopLagWarnMs: number;
@@ -17,7 +18,7 @@ const DEFAULTS: ThresholdConfig = {
   cpuCriticalPercent: 90,
   memoryWarnPercent: 80,
   memoryCriticalPercent: 95,
-  memoryRssFloorBytes: 512 * 1024 * 1024,
+  memoryRssFloorBytes: getHealthMemoryRssFloorBytes(),
 };
 
 export function evaluateHealth(

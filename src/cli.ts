@@ -80,12 +80,12 @@ if (args.includes("--version") || args.includes("-V")) {
 // `iii worker add` worker model that agentmemory hasn't been refactored
 // for yet (we still use the old `iii-exec watch` config-file model). The
 // architectural mismatch surfaces as EPIPE reconnect loops and empty
-// search results after save. Pin to v0.11.2 — the last engine that runs
+// search results after save. Pin to v0.11.3 — the last engine that runs
 // agentmemory's current worker model cleanly — until the refactor lands.
 // Override env var AGENTMEMORY_III_VERSION lets users on the sandbox
 // model already point at a newer engine without us cutting a release.
 const IIPINNED_VERSION =
-  process.env["AGENTMEMORY_III_VERSION"] || "0.11.2";
+  process.env["AGENTMEMORY_III_VERSION"] || "0.11.3";
 
 // Map Node platform/arch → the asset name iii-hq/iii ships under
 // https://github.com/iii-hq/iii/releases/download/iii/v<version>/<asset>
@@ -112,7 +112,7 @@ function iiiReleaseAsset(): string | null {
 function iiiReleaseUrl(): string | null {
   const asset = iiiReleaseAsset();
   if (!asset) return null;
-  // Tag name is monorepo-prefixed: `iii/v0.11.2`. Slash is URL-encoded
+  // Tag name is monorepo-prefixed: `iii/v0.11.3`. Slash is URL-encoded
   // by GitHub when serving the download path, hence `iii/v...` not `iii%2Fv...`.
   return `https://github.com/iii-hq/iii/releases/download/iii/v${IIPINNED_VERSION}/${asset}`;
 }
@@ -408,7 +408,7 @@ function whichBinary(name: string): string | null {
 // isolated from a user-managed iii on PATH or in ~/.local/bin. #752: a
 // fresh box with iii 0.16.1 already on PATH refused to boot because the
 // hard-pin enforcer told users to overwrite their global install with
-// v0.11.2. Private install resolves the conflict without touching their
+// v0.11.3. Private install resolves the conflict without touching their
 // existing iii.
 function agentmemoryBinDir(): string {
   if (IS_WINDOWS) {
@@ -1113,6 +1113,25 @@ async function waitForAgentmemoryReady(timeoutMs: number): Promise<boolean> {
   return false;
 }
 
+let inlineWorkerImport: Promise<void> | null = null;
+
+async function startAgentmemoryWorkerInline(): Promise<void> {
+  if (!inlineWorkerImport) {
+    inlineWorkerImport = import("./index.js").then(() => undefined);
+  }
+  await inlineWorkerImport;
+}
+
+async function ensureAgentmemoryReady(timeoutMs: number): Promise<boolean> {
+  if (await waitForAgentmemoryReady(timeoutMs)) return true;
+
+  p.log.warn(
+    "iii-engine is reachable, but /agentmemory/livez is not. Starting the agentmemory worker in this process.",
+  );
+  await startAgentmemoryWorkerInline();
+  return waitForAgentmemoryReady(timeoutMs);
+}
+
 // Derive a host string for the streams/engine WebSocket lines from
 // the configured engine URL (`III_ENGINE_URL`) or REST base
 // (`AGENTMEMORY_URL`) so a remote-bind setup like
@@ -1197,7 +1216,7 @@ async function main() {
 
   if (skipEngine) {
     if (IS_VERBOSE) p.log.info("Skipping engine check (--no-engine)");
-    await import("./index.js");
+    await startAgentmemoryWorkerInline();
     if (await waitForAgentmemoryReady(15000)) {
       const consoleState = await ensureIiiConsole();
       await maybeOfferGlobalInstall();
@@ -1233,13 +1252,40 @@ async function main() {
       }
     }
     adoptRunningEngine();
-    await import("./index.js");
-    if (await waitForAgentmemoryReady(15000)) {
+    if (await ensureAgentmemoryReady(15000)) {
       const consoleState = await ensureIiiConsole();
       await maybeOfferGlobalInstall();
       printReadyHint(consoleState);
     }
     return;
+  }
+
+  const occupiedPids = findEnginePidsByPort(getRestPort());
+  if (occupiedPids.length > 0) {
+    const port = getRestPort();
+    p.log.warn(
+      `REST port ${port} is already in use by pid(s) ${occupiedPids.join(", ")}; waiting for the existing process instead of starting another iii-engine.`,
+    );
+    adoptRunningEngine();
+    if ((await waitForEngine(15000)) && (await ensureAgentmemoryReady(15000))) {
+      const consoleState = await ensureIiiConsole();
+      await maybeOfferGlobalInstall();
+      printReadyHint(consoleState);
+      return;
+    }
+    p.log.error(
+      `REST port ${port} is occupied, but it did not become a healthy iii-engine/agentmemory service.`,
+    );
+    p.note(
+      [
+        `Check the process bound to port ${port}:`,
+        portInUseDiagnostic(port),
+        "",
+        "Stop that process or start agentmemory on another port with --port <N>.",
+      ].join("\n"),
+      "Port already in use",
+    );
+    process.exit(1);
   }
 
   const started = await startEngine();
@@ -1306,8 +1352,7 @@ async function main() {
   }
 
   s.stop("iii-engine is ready");
-  await import("./index.js");
-  if (await waitForAgentmemoryReady(15000)) {
+  if (await ensureAgentmemoryReady(15000)) {
     const consoleState = await ensureIiiConsole();
     await maybeOfferGlobalInstall();
     printReadyHint(consoleState);
@@ -2143,7 +2188,7 @@ async function startServerForDemo(): Promise<() => Promise<void>> {
     }
   }
 
-  await import("./index.js");
+  await startAgentmemoryWorkerInline();
   if (!(await waitForAgentmemoryReady(15000))) {
     p.log.error("agentmemory worker did not become ready within 15s.");
     process.exit(1);
@@ -2309,8 +2354,8 @@ async function runUpgrade() {
         label: "Refreshing dependencies (pnpm install)",
       });
       requireSuccess(installOk, "pnpm install");
-      runCommand(pnpmBin, ["up", "iii-sdk@0.11.2"], {
-        label: "Pinning iii-sdk@0.11.2",
+      runCommand(pnpmBin, ["add", "iii-sdk@0.11.3", "--save-exact"], {
+        label: "Pinning iii-sdk@0.11.3 exactly",
         optional: true,
       });
     } else if (npmBin) {
@@ -2318,8 +2363,8 @@ async function runUpgrade() {
         label: "Refreshing dependencies (npm install)",
       });
       requireSuccess(installOk, "npm install");
-      runCommand(npmBin, ["install", "iii-sdk@0.11.2"], {
-        label: "Pinning iii-sdk@0.11.2",
+      runCommand(npmBin, ["install", "iii-sdk@0.11.3", "--save-exact"], {
+        label: "Pinning iii-sdk@0.11.3 exactly",
         optional: true,
       });
     } else {

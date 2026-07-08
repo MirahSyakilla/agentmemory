@@ -3,7 +3,9 @@ import {
   buildAuthHeaders,
   buildChatUrl,
   buildEmbeddingUrl,
+  buildResponseUrl,
   detectAzure,
+  formatHttpErrorBody,
   normalizeBaseUrl,
 } from "../src/providers/_openai-shared.js";
 import { OpenAIEmbeddingProvider } from "../src/providers/embedding/openai.js";
@@ -150,6 +152,40 @@ describe("_openai-shared — buildEmbeddingUrl", () => {
   });
 });
 
+describe("_openai-shared — buildResponseUrl", () => {
+  it("appends /v1/responses for standard OpenAI", () => {
+    expect(
+      buildResponseUrl(
+        "https://api.openai.com",
+        false,
+        "2024-08-01-preview",
+      ),
+    ).toBe("https://api.openai.com/v1/responses");
+  });
+
+  it("appends /responses + api-version for Azure legacy", () => {
+    const url = buildResponseUrl(
+      "https://r.openai.azure.com/openai/deployments/gpt-d",
+      true,
+      "2024-08-01-preview",
+    );
+    expect(url).toBe(
+      "https://r.openai.azure.com/openai/deployments/gpt-d/responses?api-version=2024-08-01-preview",
+    );
+  });
+
+  it("routes through /openai/v1/responses on Azure v1", () => {
+    const url = buildResponseUrl(
+      "https://r.openai.azure.com",
+      true,
+      "2024-08-01-preview",
+    );
+    const parsed = new URL(url);
+    expect(parsed.pathname).toBe("/openai/v1/responses");
+    expect(parsed.searchParams.get("api-version")).toBeNull();
+  });
+});
+
 describe("_openai-shared — non-OpenAI base URLs (#628, #646)", () => {
   it("does not double /v1 when base URL already ends with /v1 (DeepSeek shape, #628)", () => {
     expect(
@@ -225,6 +261,20 @@ describe("_openai-shared — normalizeBaseUrl", () => {
     expect(normalizeBaseUrl("https://api.deepseek.com/v1")).toBe(
       "https://api.deepseek.com/v1",
     );
+  });
+});
+
+describe("_openai-shared — formatHttpErrorBody", () => {
+  it("collapses whitespace and truncates long upstream error bodies", () => {
+    const body = `<html>
+      <body>${"x".repeat(800)}</body>
+    </html>`;
+
+    const formatted = formatHttpErrorBody(body);
+
+    expect(formatted).not.toContain("\n");
+    expect(formatted.length).toBeLessThan(600);
+    expect(formatted).toContain("[truncated ");
   });
 });
 

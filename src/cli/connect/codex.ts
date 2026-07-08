@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import * as p from "@clack/prompts";
 import type { ConnectAdapter, ConnectOptions, ConnectResult } from "./types.js";
 import {
@@ -21,15 +21,23 @@ const CODEX_DIR = join(homedir(), ".codex");
 const CODEX_TOML = join(CODEX_DIR, "config.toml");
 const CODEX_HOOKS = join(CODEX_DIR, "hooks.json");
 
-const TOML_BLOCK = `[mcp_servers.agentmemory]
-command = "npx"
-args = ["-y", "@agentmemory/mcp"]
+const SECTION_HEADER = "[mcp_servers.agentmemory]";
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function buildTomlBlock(): string {
+  const standalonePath = resolve(join(findPluginRoot(), "..", "dist", "standalone.mjs"));
+  return `[mcp_servers.agentmemory]
+command = "node"
+args = [${tomlString(standalonePath)}]
 
 [mcp_servers.agentmemory.env]
 AGENTMEMORY_URL = "http://localhost:3111"
+AGENTMEMORY_TOOLS = "all"
 `;
-
-const SECTION_HEADER = "[mcp_servers.agentmemory]";
+}
 
 function isWiredText(toml: string): boolean {
   return toml.includes(SECTION_HEADER);
@@ -100,7 +108,7 @@ export const adapter: ConnectAdapter = {
 
     const cleaned = wired ? stripExistingBlock(current) : current;
     const joiner = cleaned.length === 0 || cleaned.endsWith("\n") ? "" : "\n";
-    const next = `${cleaned}${joiner}${cleaned.length > 0 ? "\n" : ""}${TOML_BLOCK}`;
+    const next = `${cleaned}${joiner}${cleaned.length > 0 ? "\n" : ""}${buildTomlBlock()}`;
     writeFileSync(CODEX_TOML, next, "utf-8");
 
     const verify = readFileSync(CODEX_TOML, "utf-8");

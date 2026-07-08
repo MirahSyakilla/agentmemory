@@ -597,15 +597,15 @@ npm install && npm run build && npm start
 
 `iii`가 이미 설치되어 있으면 로컬 `iii-engine`으로 agentmemory를 시작하고, Docker가 사용 가능하면 Docker Compose로 폴백합니다. REST, 스트림, 뷰어는 기본적으로 `127.0.0.1`에 바인딩됩니다.
 
-`iii-engine`을 수동으로 설치하십시오. **agentmemory는 현재 `iii-engine`을 `v0.11.2`로 고정합니다** — `v0.11.6`은 모든 것을 `iii worker add`를 통해 샌드박스화하는 새 모델을 도입했는데 agentmemory는 아직 이를 위해 리팩터링되지 않았기 때문입니다. 리팩터링이 완료되면 고정이 풀립니다. 수동으로 sandbox 모델로 마이그레이션했다면 `AGENTMEMORY_III_VERSION=<version>`으로 덮어쓰십시오.
+`iii-engine`을 수동으로 설치하십시오. **agentmemory는 현재 `iii-engine`을 `v0.11.3`로 고정합니다** — `v0.11.6`은 모든 것을 `iii worker add`를 통해 샌드박스화하는 새 모델을 도입했는데 agentmemory는 아직 이를 위해 리팩터링되지 않았기 때문입니다. 리팩터링이 완료되면 고정이 풀립니다. 수동으로 sandbox 모델로 마이그레이션했다면 `AGENTMEMORY_III_VERSION=<version>`으로 덮어쓰십시오.
 
-- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.2/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
+- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.3/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
 - **macOS x64:** `aarch64-apple-darwin`을 `x86_64-apple-darwin`으로 교체
 - **Linux x64:** `x86_64-unknown-linux-gnu`로 교체
 - **Linux arm64:** `aarch64-unknown-linux-gnu`로 교체
-- **Windows:** [iii-hq/iii releases v0.11.2](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2)에서 `iii-x86_64-pc-windows-msvc.zip`을 다운로드하고 `iii.exe`를 추출한 후 PATH에 추가
+- **Windows:** [iii-hq/iii releases v0.11.3](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3)에서 `iii-x86_64-pc-windows-msvc.zip`을 다운로드하고 `iii.exe`를 추출한 후 PATH에 추가
 
-또는 Docker 사용 (번들된 `docker-compose.yml`이 `iiidev/iii:0.11.2`를 pull). 전체 문서: [iii.dev/docs](https://iii.dev/docs).
+또는 Docker 사용 (번들된 `docker-compose.yml`이 `iiidev/iii:0.11.3`를 pull). 전체 문서: [iii.dev/docs](https://iii.dev/docs).
 
 ### Windows
 
@@ -614,8 +614,8 @@ agentmemory는 Windows 10/11에서 실행되지만, Node.js 패키지만으로�
 **옵션 A — 사전 빌드된 Windows 바이너리 (권장):**
 
 ```powershell
-# 1. Open https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2 in your browser
-#    (we pin to v0.11.2 until agentmemory refactors for the new sandbox
+# 1. Open https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3 in your browser
+#    (we pin to v0.11.3 until agentmemory refactors for the new sandbox
 #     model that engine v0.11.6+ requires)
 # 2. Download iii-x86_64-pc-windows-msvc.zip
 #    (or iii-aarch64-pc-windows-msvc.zip if you're on an ARM machine)
@@ -624,7 +624,7 @@ agentmemory는 Windows 10/11에서 실행되지만, Node.js 패키지만으로�
 #    (agentmemory checks that location automatically)
 # 4. Verify:
 iii --version
-# Should print: 0.11.2
+# Should print: 0.11.3
 
 # 5. Then run agentmemory as usual:
 npx -y @agentmemory/agentmemory

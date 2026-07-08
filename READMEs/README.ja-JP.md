@@ -598,15 +598,15 @@ npm install && npm run build && npm start
 
 `iii` が既にインストールされていれば、これでローカルの `iii-engine` で agentmemory が起動します。Docker が使える場合は Docker Compose にフォールバックします。REST、ストリーム、ビューワーはデフォルトで `127.0.0.1` にバインドします。
 
-`iii-engine` を手動でインストールしてください。**agentmemory は現在 `iii-engine` を `v0.11.2` にピン留めしています** — `v0.11.6` では `iii worker add` で何でもサンドボックス化する新モデルが導入されましたが、agentmemory はまだそれ向けにリファクタリングされていません。リファクタが完了次第ピンは解除されます。サンドボックスモデルへ手動移行済みなら `AGENTMEMORY_III_VERSION=<version>` でオーバーライドできます。
+`iii-engine` を手動でインストールしてください。**agentmemory は現在 `iii-engine` を `v0.11.3` にピン留めしています** — `v0.11.6` では `iii worker add` で何でもサンドボックス化する新モデルが導入されましたが、agentmemory はまだそれ向けにリファクタリングされていません。リファクタが完了次第ピンは解除されます。サンドボックスモデルへ手動移行済みなら `AGENTMEMORY_III_VERSION=<version>` でオーバーライドできます。
 
-- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.2/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
+- **macOS arm64:** `mkdir -p ~/.local/bin && curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v0.11.3/iii-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/iii`
 - **macOS x64:** `aarch64-apple-darwin` を `x86_64-apple-darwin` に置換
 - **Linux x64:** `x86_64-unknown-linux-gnu` に置換
 - **Linux arm64:** `aarch64-unknown-linux-gnu` に置換
-- **Windows:** [iii-hq/iii releases v0.11.2](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2) から `iii-x86_64-pc-windows-msvc.zip` をダウンロード、`iii.exe` を展開し PATH に追加
+- **Windows:** [iii-hq/iii releases v0.11.3](https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3) から `iii-x86_64-pc-windows-msvc.zip` をダウンロード、`iii.exe` を展開し PATH に追加
 
-または Docker を使用(同梱の `docker-compose.yml` が `iiidev/iii:0.11.2` を pull します)。詳細ドキュメント:[iii.dev/docs](https://iii.dev/docs)。
+または Docker を使用(同梱の `docker-compose.yml` が `iiidev/iii:0.11.3` を pull します)。詳細ドキュメント:[iii.dev/docs](https://iii.dev/docs)。
 
 ### Windows
 
@@ -615,9 +615,9 @@ agentmemory は Windows 10/11 で動作しますが、Node.js パッケージだ
 **選択肢 A — ビルド済み Windows バイナリ(推奨):**
 
 ```powershell
-# 1. ブラウザで https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.2 を開く
+# 1. ブラウザで https://github.com/iii-hq/iii/releases/tag/iii%2Fv0.11.3 を開く
 #    (engine v0.11.6+ が要求する新しいサンドボックスモデルへ
-#     agentmemory がリファクタリングされるまで v0.11.2 にピン留め)
+#     agentmemory がリファクタリングされるまで v0.11.3 にピン留め)
 # 2. iii-x86_64-pc-windows-msvc.zip をダウンロード
 #    (ARM マシンの場合は iii-aarch64-pc-windows-msvc.zip)
 # 3. iii.exe を PATH 上のどこかに展開、または以下に配置:
@@ -625,7 +625,7 @@ agentmemory は Windows 10/11 で動作しますが、Node.js パッケージだ
 #    (agentmemory はこの場所を自動でチェックします)
 # 4. 確認:
 iii --version
-# 出力: 0.11.2
+# 出力: 0.11.3
 
 # 5. その後 agentmemory を通常通り起動:
 npx -y @agentmemory/agentmemory

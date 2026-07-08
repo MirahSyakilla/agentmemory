@@ -5,7 +5,9 @@ import {
   DEFAULT_AZURE_API_VERSION,
   buildAuthHeaders,
   buildChatUrl,
+  buildResponseUrl,
   detectAzure,
+  formatHttpErrorBody,
   normalizeBaseUrl,
 } from "./_openai-shared.js";
 
@@ -21,7 +23,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  *   - DeepSeek
  *   - 硅基流动 (SiliconFlow)
  *   - vLLM / LM Studio / Ollama (with OpenAI compatibility layer)
- *   - Any other proxy implementing /v1/chat/completions
+ *   - Any other proxy implementing /v1/responses
  *
  * Required env vars:
  *   OPENAI_API_KEY  — API key
@@ -39,10 +41,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  *                              OPENAI_TIMEOUT_MS is not set. Default: 60000.
  *   MAX_TOKENS               — max output tokens (default: from config or 4096)
  *   OPENAI_REASONING_EFFORT  — "low" | "medium" | "high" | "none"
- *                              Passthrough for reasoning models (e.g. Ollama Cloud
- *                              thinking models). Set to "none" to ensure
- *                              message.content is populated instead of only
- *                              message.reasoning.
+ *                              Passed through to the Responses API reasoning block.
  */
 export class OpenAIProvider implements MemoryProvider {
   name = "openai";
@@ -76,10 +75,81 @@ export class OpenAIProvider implements MemoryProvider {
   }
 
   private async call(systemPrompt: string, userPrompt: string): Promise<string> {
+    const response = await this.sendResponses(systemPrompt, userPrompt);
+    if (response.ok) {
+      const data = (await response.json()) as ResponsesPayload;
+      const content = extractResponsesText(data);
+      if (content) return content;
+      throw new Error(
+        `OpenAI returned unexpected response: ${JSON.stringify(data).slice(0, 200)}`,
+      );
+    }
+
+    const errorText = await response.text();
+    if (shouldFallbackToChat(response.status, errorText)) {
+      return this.callChat(systemPrompt, userPrompt);
+    }
+    throw new Error(
+      `OpenAI API error (${response.status}): ${formatHttpErrorBody(errorText)}`,
+    );
+  }
+
+  private async sendResponses(
+    systemPrompt: string,
+    userPrompt: string,
+  ): Promise<Response> {
+    let includeTokenCap = true;
+    while (true) {
+      const response = await this.sendResponsesRequest(
+        systemPrompt,
+        userPrompt,
+        includeTokenCap,
+      );
+      if (response.ok) return response;
+      if (!includeTokenCap) return response;
+      const errorText = await response.text();
+      if (!isResponsesTokenParamError(response.status, errorText)) {
+        return new Response(errorText, {
+          status: response.status,
+          headers: response.headers,
+        });
+      }
+      includeTokenCap = false;
+    }
+  }
+
+  private async sendResponsesRequest(
+    systemPrompt: string,
+    userPrompt: string,
+    includeTokenCap: boolean,
+  ): Promise<Response> {
+    const url = buildResponseUrl(
+      this.baseUrl,
+      this.isAzure,
+      this.azureApiVersion,
+    );
+    const body: Record<string, unknown> = {
+      model: this.model,
+      instructions: systemPrompt,
+      input: userPrompt,
+      stream: false,
+    };
+    if (includeTokenCap) {
+      body.max_output_tokens = this.maxTokens;
+    }
+    if (this.reasoningEffort && this.reasoningEffort !== "none") {
+      body.reasoning = { effort: this.reasoningEffort };
+    }
+    return this.fetchJson(url, body);
+  }
+
+  private async callChat(
+    systemPrompt: string,
+    userPrompt: string,
+  ): Promise<string> {
     const url = buildChatUrl(this.baseUrl, this.isAzure, this.azureApiVersion);
     const body: Record<string, unknown> = {
       model: this.model,
-      max_tokens: this.maxTokens,
       // OpenAI API spec defines `stream` as defaulting to false, so omitting
       // it should yield a JSON response. Some OpenAI-compatible proxies
       // (notably 9Router < 0.4.56 — see decolua/9router#1260) default to
@@ -92,10 +162,29 @@ export class OpenAIProvider implements MemoryProvider {
         { role: "user", content: userPrompt },
       ],
     };
+    body.max_tokens = this.maxTokens;
     if (this.reasoningEffort) {
       body.reasoning_effort = this.reasoningEffort;
     }
+    const response = await this.fetchJson(url, body);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(
+        `OpenAI API error (${response.status}): ${formatHttpErrorBody(text)}`,
+      );
+    }
+    const data = (await response.json()) as ChatCompletionsPayload;
+    const content = extractChatText(data);
+    if (content) return content;
+    throw new Error(
+      `OpenAI returned unexpected response: ${JSON.stringify(data).slice(0, 200)}`,
+    );
+  }
 
+  private async fetchJson(
+    url: string,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
     // Bound the request via the shared fetchWithTimeout helper, which
     // owns the AbortController + clearTimeout cleanup for every raw-fetch
     // provider (minimax, openrouter, gemini, openrouter-embed, etc.).
@@ -122,33 +211,74 @@ export class OpenAIProvider implements MemoryProvider {
       }
       throw err;
     }
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`OpenAI API error (${response.status}): ${text}`);
-    }
-
-    const data = (await response.json()) as {
-      choices?: Array<{
-        message?: { content?: string; reasoning?: string; reasoning_content?: string };
-      }>;
-    };
-    const message = data.choices?.[0]?.message;
-    const content = message?.content;
-    if (content) {
-      return content;
-    }
-    // Fallback: some thinking models return reasoning but no content.
-    // DeepSeek V4 / Qwen3 / GLM / Kimi return `reasoning_content`;
-    // older OpenAI o-series + some compatibles return `reasoning`. #627
-    const reasoning = message?.reasoning ?? message?.reasoning_content;
-    if (reasoning) {
-      return reasoning;
-    }
-    throw new Error(
-      `OpenAI returned unexpected response: ${JSON.stringify(data).slice(0, 200)}`,
-    );
+    return response;
   }
+}
+
+type ResponsesPayload = {
+  output_text?: string;
+  output?: Array<{
+    type?: string;
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+  }>;
+  choices?: Array<{
+    message?: { content?: string; reasoning?: string; reasoning_content?: string };
+  }>;
+};
+
+type ChatCompletionsPayload = {
+  choices?: Array<{
+    message?: { content?: string; reasoning?: string; reasoning_content?: string };
+  }>;
+};
+
+function extractResponsesText(data: ResponsesPayload): string | null {
+  if (typeof data.output_text === "string" && data.output_text.length > 0) {
+    return data.output_text;
+  }
+  for (const item of data.output ?? []) {
+    if (item.type !== "message") continue;
+    for (const content of item.content ?? []) {
+      if (
+        (content.type === "output_text" || content.type === "text") &&
+        typeof content.text === "string" &&
+        content.text.length > 0
+      ) {
+        return content.text;
+      }
+    }
+  }
+  return extractChatText(data);
+}
+
+function extractChatText(data: ChatCompletionsPayload): string | null {
+  const message = data.choices?.[0]?.message;
+  const content = message?.content;
+  if (content) return content;
+  const reasoning = message?.reasoning ?? message?.reasoning_content;
+  return reasoning || null;
+}
+
+function isResponsesTokenParamError(status: number, errorText: string): boolean {
+  if (status !== 400 && status !== 422) return false;
+  const lower = errorText.toLowerCase();
+  return (
+    /(unsupported|unknown|unrecognized|invalid).{0,80}parameter/.test(lower) &&
+    /max_output_tokens/.test(lower)
+  );
+}
+
+function shouldFallbackToChat(status: number, errorText: string): boolean {
+  if (status === 404 || status === 405 || status === 501) return true;
+  if (status !== 400 && status !== 422) return false;
+  const lower = errorText.toLowerCase();
+  return (
+    /responses/.test(lower) &&
+    /(unsupported|unknown|unrecognized|not found|invalid url|no route|does not exist)/.test(lower)
+  );
 }
 
 // Resolves the outbound-fetch timeout for the OpenAI LLM path.
@@ -179,4 +309,3 @@ function parsePositiveInt(raw: string | null | undefined): number | undefined {
   const n = Number(trimmed);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
-

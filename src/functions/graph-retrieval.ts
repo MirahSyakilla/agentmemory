@@ -1,6 +1,8 @@
 import type {
+  CompressedObservation,
   GraphNode,
   GraphEdge,
+  Session,
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -39,7 +41,39 @@ function buildGraphContext(
 }
 
 export class GraphRetrieval {
+  private obsSessionCache: Map<string, string | null> | null = null;
+
   constructor(private kv: StateKV) {}
+
+  private sessionIdFromNode(node: GraphNode, obsId: string): string | undefined {
+    const idx = node.sourceObservationIds.indexOf(obsId);
+    return node.sourceSessionIds?.[idx] || node.sourceSessionIds?.[0];
+  }
+
+  private async loadObservationSessionIndex(): Promise<Map<string, string | null>> {
+    if (this.obsSessionCache) return this.obsSessionCache;
+    const cache = new Map<string, string | null>();
+    this.obsSessionCache = cache;
+    const sessions = await this.kv.list<Session>(KV.sessions).catch(() => []);
+    await Promise.all(
+      sessions.map(async (session) => {
+        const observations = await this.kv
+          .list<CompressedObservation>(KV.observations(session.id))
+          .catch(() => []);
+        for (const obs of observations) {
+          cache.set(obs.id, obs.sessionId || session.id);
+        }
+      }),
+    );
+    return cache;
+  }
+
+  private async resolveSessionId(node: GraphNode, obsId: string): Promise<string> {
+    const direct = this.sessionIdFromNode(node, obsId);
+    if (direct) return direct;
+    const sessionIndex = await this.loadObservationSessionIndex();
+    return sessionIndex.get(obsId) ?? "";
+  }
 
   async searchByEntities(
     entityNames: string[],
@@ -76,6 +110,7 @@ export class GraphRetrieval {
         for (const obsId of lastNode.sourceObservationIds) {
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
+          const sessionId = await this.resolveSessionId(lastNode, obsId);
 
           const pathLength = path.length;
           const edgeWeights = path
@@ -89,7 +124,7 @@ export class GraphRetrieval {
 
           results.push({
             obsId,
-            sessionId: "",
+            sessionId,
             score,
             graphContext: buildGraphContext(path),
             pathLength,
@@ -100,9 +135,10 @@ export class GraphRetrieval {
       for (const obsId of startNode.sourceObservationIds) {
         if (visitedObs.has(obsId)) continue;
         visitedObs.add(obsId);
+        const sessionId = await this.resolveSessionId(startNode, obsId);
         results.push({
           obsId,
-          sessionId: "",
+          sessionId,
           score: 1.0,
           graphContext: `[${startNode.type}] ${startNode.name}`,
           pathLength: 0,
@@ -136,13 +172,14 @@ export class GraphRetrieval {
         for (const obsId of lastNode.sourceObservationIds) {
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
+          const sessionId = await this.resolveSessionId(lastNode, obsId);
 
           const pathLength = path.length;
           const score = 0.5 * (1 / (pathLength + 1));
 
           results.push({
             obsId,
-            sessionId: "",
+            sessionId,
             score,
             graphContext: buildGraphContext(path),
             pathLength,

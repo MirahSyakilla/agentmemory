@@ -14,7 +14,7 @@ import {
   normalizeAccessLog,
 } from "./access-tracker.js";
 import { recordAudit } from "./audit.js";
-import { getSearchIndex, vectorIndexRemove, flushIndexSave } from "./search.js";
+import { lexicalIndexRemove, vectorIndexRemove, flushIndexSave } from "./search.js";
 import { logger } from "../logger.js";
 
 const DEFAULT_DECAY: DecayConfig = {
@@ -371,8 +371,8 @@ export function registerRetentionFunctions(
           await kv.delete(scope, candidate.memoryId);
           await kv.delete(KV.retentionScores, candidate.memoryId);
           await deleteAccessLog(kv, candidate.memoryId);
-          getSearchIndex().remove(candidate.memoryId);
-          vectorIndexRemove(candidate.memoryId);
+          await lexicalIndexRemove(candidate.memoryId);
+          await vectorIndexRemove(candidate.memoryId);
           evicted++;
           evictedIds.push(candidate.memoryId);
           if (resolvedSource === "semantic") evictedSemantic++;

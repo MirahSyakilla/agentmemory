@@ -1,5 +1,4 @@
-import { SearchIndex } from "./search-index.js";
-import { VectorIndex } from "./vector-index.js";
+import type { LexicalStore } from "./lexical-store.js";
 import type {
   EmbeddingProvider,
   HybridSearchResult,
@@ -16,15 +15,18 @@ import {
 } from "../functions/graph-retrieval.js";
 import { extractEntitiesFromQuery } from "../functions/query-expansion.js";
 import { rerank } from "./reranker.js";
+import { isSmartSearchGraphEnabled } from "../config.js";
+import type { VectorStore } from "./vector-store.js";
 
 const RRF_K = 60;
 
 export class HybridSearch {
   private graphRetrieval: GraphRetrieval;
+  private graphEnabled: boolean;
 
   constructor(
-    private bm25: SearchIndex,
-    private vector: VectorIndex | null,
+    private bm25: LexicalStore,
+    private vector: VectorStore | null,
     private embeddingProvider: EmbeddingProvider | null,
     private kv: StateKV,
     private bm25Weight = 0.4,
@@ -33,6 +35,7 @@ export class HybridSearch {
     private rerankEnabled = process.env.RERANK_ENABLED === "true",
   ) {
     this.graphRetrieval = new GraphRetrieval(kv);
+    this.graphEnabled = isSmartSearchGraphEnabled();
   }
 
   async search(query: string, limit = 20): Promise<HybridSearchResult[]> {
@@ -79,7 +82,7 @@ export class HybridSearch {
     limit: number,
     entityHints?: string[],
   ): Promise<HybridSearchResult[]> {
-    const bm25Results = this.bm25.search(query, limit * 2);
+    const bm25Results = await this.bm25.search(query, limit * 2);
 
     let vectorResults: Array<{
       obsId: string;
@@ -88,40 +91,42 @@ export class HybridSearch {
     }> = [];
     let queryEmbedding: Float32Array | null = null;
 
-    if (this.vector && this.embeddingProvider && this.vector.size > 0) {
+    if (this.vector && this.embeddingProvider) {
       try {
         queryEmbedding = await this.embeddingProvider.embed(query);
-        vectorResults = this.vector.search(queryEmbedding, limit * 2);
+        vectorResults = await this.vector.search(queryEmbedding, limit * 2);
       } catch {
         // fall through to BM25-only
       }
     }
 
-    const entities =
-      entityHints && entityHints.length > 0
-        ? entityHints
-        : extractEntitiesFromQuery(query);
     let graphResults: GraphRetrievalResult[] = [];
-    if (entities.length > 0) {
-      try {
-        graphResults = await this.graphRetrieval.searchByEntities(
-          entities,
-          2,
-          limit,
-        );
-      } catch {
-        // graph search is best-effort
+    if (this.graphEnabled) {
+      const entities =
+        entityHints && entityHints.length > 0
+          ? entityHints
+          : extractEntitiesFromQuery(query);
+      if (entities.length > 0) {
+        try {
+          graphResults = await this.graphRetrieval.searchByEntities(
+            entities,
+            2,
+            limit,
+          );
+        } catch {
+          // graph search is best-effort
+        }
       }
-    }
 
-    const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
-    if (topVectorObs.length > 0) {
-      try {
-        const expansionResults =
-          await this.graphRetrieval.expandFromChunks(topVectorObs, 1, 5);
-        graphResults = [...graphResults, ...expansionResults];
-      } catch {
-        // expansion is best-effort
+      const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
+      if (topVectorObs.length > 0) {
+        try {
+          const expansionResults =
+            await this.graphRetrieval.expandFromChunks(topVectorObs, 1, 5);
+          graphResults = [...graphResults, ...expansionResults];
+        } catch {
+          // expansion is best-effort
+        }
       }
     }
 

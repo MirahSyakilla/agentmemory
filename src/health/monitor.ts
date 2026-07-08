@@ -71,6 +71,7 @@ export function registerHealthMonitor(
         heapTotal: mem.heapTotal,
         rss: mem.rss,
         external: mem.external,
+        arrayBuffers: mem.arrayBuffers,
       },
       cpu: {
         userMicros: currentCpu.user,

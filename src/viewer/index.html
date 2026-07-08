@@ -1033,6 +1033,7 @@
   </footer>
 
   <script nonce="__AGENTMEMORY_VIEWER_NONCE__">
+    window.__agentmemoryRssGaugeMaxMb = __AGENTMEMORY_RSS_GAUGE_MAX_MB__;
     var params = new URLSearchParams(window.location.search);
     var paramPort = params.get('port');
     var locPort = window.location.port;
@@ -1113,7 +1114,7 @@
       dashboard: { loaded: false, health: null, sessions: [], memories: [], graphStats: null, recentAudit: [], lessons: [], crystals: [] },
       graph: { loaded: false, nodes: [], edges: [], stats: null, filters: {}, selectedNode: null, queryError: null, truncated: false, totalNodes: 0, totalEdges: 0 },
       memories: { loaded: false, items: [], search: '', typeFilter: '' },
-      timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50 },
+      timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50, total: 0, hasMore: false },
       sessions: { loaded: false, items: [], selectedId: null },
       audit: { loaded: false, entries: [], opFilter: '' },
       activity: { loaded: false, observations: [], sessions: [], typeFilter: '' },
@@ -1341,7 +1342,9 @@
 
     async function loadDashboard() {
       var el = document.getElementById('view-dashboard');
-      el.innerHTML = '<div class="loading">Loading dashboard...</div>';
+      if (!state.dashboard.health) {
+        el.innerHTML = '<div class="loading">Loading dashboard...</div>';
+      }
       try {
         var results = await Promise.all([
           apiGet('health'),
@@ -1434,7 +1437,7 @@
       var totalObs = d.sessions.reduce(function(a, s) { return a + (s.observationCount || 0); }, 0);
       var tokenBudget = parseInt(new URLSearchParams(window.location.search).get('tokenBudget') || '2000', 10) || 2000;
       var estFull = totalObs * 80;
-      var estInjected = d.sessions.length * tokenBudget;
+      var estInjected = activeSessions * tokenBudget;
       var savings = estFull > 0 ? Math.round((1 - estInjected / Math.max(estFull, 1)) * 100) : 0;
       if (savings < 0) savings = 0;
       var tokensSaved = Math.max(0, estFull - estInjected);
@@ -1451,11 +1454,12 @@
           var heapUsed = Math.round((snap.memory.heapUsed || 0) / 1024 / 1024);
           var heapTotal = Math.round((snap.memory.heapTotal || 0) / 1024 / 1024);
           var rss = Math.round((snap.memory.rss || 0) / 1024 / 1024);
+          var rssGaugeMaxMb = window.__agentmemoryRssGaugeMaxMb || 512;
           var heapPct = heapTotal > 0 ? Math.round((heapUsed / heapTotal) * 100) : 0;
-          var rssAboveFloor = rss >= 512;
+          var rssAboveFloor = rss >= rssGaugeMaxMb;
           var heapColor = (heapPct > 80 && rssAboveFloor) ? 'var(--red)' : (heapPct > 60 && rssAboveFloor) ? 'var(--yellow)' : 'var(--green)';
           html += '<div class="gauge"><span class="gauge-label">Heap</span><div class="gauge-bar"><div class="gauge-fill" style="width:' + heapPct + '%;background:' + heapColor + '"></div></div><span class="gauge-value">' + heapUsed + ' / ' + heapTotal + ' MB</span></div>';
-          html += '<div class="gauge"><span class="gauge-label">RSS</span><div class="gauge-bar"><div class="gauge-fill" style="width:' + Math.min(100, Math.round(rss / 512 * 100)) + '%;background:var(--blue)"></div></div><span class="gauge-value">' + rss + ' MB</span></div>';
+          html += '<div class="gauge"><span class="gauge-label">RSS</span><div class="gauge-bar"><div class="gauge-fill" style="width:' + Math.min(100, Math.round(rss / Math.max(rssGaugeMaxMb, 1) * 100)) + '%;background:var(--blue)"></div></div><span class="gauge-value">' + rss + ' MB</span></div>';
           if (snap.memory.external) {
             var ext = Math.round(snap.memory.external / 1024 / 1024);
             html += '<div class="gauge"><span class="gauge-label">External</span><div class="gauge-bar"><div class="gauge-fill" style="width:' + Math.min(100, Math.round(ext / 128 * 100)) + '%;background:var(--purple)"></div></div><span class="gauge-value">' + ext + ' MB</span></div>';
@@ -1648,9 +1652,18 @@
     }
 
     var dashboardTimer = null;
+    var dashRefreshTimer = null;
+    var DASH_REFRESH_DEBOUNCE_MS = 2500;
     function refreshDashboard() {
       state.dashboard.loaded = false;
       loadDashboard();
+    }
+    function scheduleDashboardRefresh() {
+      if (dashRefreshTimer) return;
+      dashRefreshTimer = setTimeout(function() {
+        dashRefreshTimer = null;
+        if (state.activeTab === 'dashboard') refreshDashboard();
+      }, DASH_REFRESH_DEBOUNCE_MS);
     }
     function startDashboardAutoRefresh() {
       if (dashboardTimer) clearInterval(dashboardTimer);
@@ -2585,8 +2598,11 @@
         return;
       }
       content.innerHTML = '<div class="loading">Loading observations...</div>';
-      var result = await apiGet('observations?sessionId=' + encodeURIComponent(state.timeline.sessionId));
+      var offset = state.timeline.page * state.timeline.pageSize;
+      var result = await apiGet('observations?sessionId=' + encodeURIComponent(state.timeline.sessionId) + '&limit=' + state.timeline.pageSize + '&offset=' + offset);
       state.timeline.observations = (result && result.observations) || [];
+      state.timeline.total = result && typeof result.total === 'number' ? result.total : state.timeline.observations.length;
+      state.timeline.hasMore = !!(result && result.hasMore);
       renderObservations();
     }
 
@@ -2617,9 +2633,9 @@
 
       var pageSize = state.timeline.pageSize;
       var page = state.timeline.page;
-      var start = page * pageSize;
-      var paged = filtered.slice(start, start + pageSize);
-      var totalPages = Math.ceil(filtered.length / pageSize);
+      var paged = filtered;
+      var total = state.timeline.total || obs.length;
+      var totalPages = Math.max(1, Math.ceil(total / pageSize));
 
       var html = '<div class="type-chips">';
       html += '<span class="type-chip' + (!tlTypeFilter ? ' active' : '') + '" data-action="timeline-filter" data-type-filter="">All (' + obs.length + ')</span>';
@@ -2635,7 +2651,7 @@
         return;
       }
 
-      html += '<div style="font-size:11px;color:var(--ink-faint);margin-bottom:16px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.06em;">' + filtered.length + ' observations shown</div>';
+      html += '<div style="font-size:11px;color:var(--ink-faint);margin-bottom:16px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.06em;">' + filtered.length + ' observations shown on page · ' + total + ' total</div>';
 
       html += '<div class="timeline-container">';
 
@@ -2738,7 +2754,7 @@
       if (totalPages > 1) {
         html += '<div class="pagination">';
         if (page > 0) html += '<button class="btn" data-action="timeline-page" data-page="' + (page - 1) + '">Prev</button>';
-        html += '<span style="color:var(--ink-faint);font-size:12px;padding:6px;font-family:var(--font-mono);">Page ' + (page + 1) + ' of ' + totalPages + ' (' + filtered.length + ' total)</span>';
+        html += '<span style="color:var(--ink-faint);font-size:12px;padding:6px;font-family:var(--font-mono);">Page ' + (page + 1) + ' of ' + totalPages + ' (' + total + ' total)</span>';
         if (page < totalPages - 1) html += '<button class="btn" data-action="timeline-page" data-page="' + (page + 1) + '">Next</button>';
         html += '</div>';
       }
@@ -2749,12 +2765,12 @@
     function setTlTypeFilter(type) {
       tlTypeFilter = type;
       state.timeline.page = 0;
-      renderObservations();
+      loadObservations();
     }
 
     function tlPage(p) {
       state.timeline.page = p;
-      renderObservations();
+      loadObservations();
     }
 
     async function loadActivity() {
@@ -2772,7 +2788,7 @@
       var recentSessions = sorted.slice(0, 5);
 
       var obsResults = await Promise.all(recentSessions.filter(function(s) { return sessionId(s); }).map(function(s) {
-        return apiGet('observations?sessionId=' + encodeURIComponent(sessionId(s)));
+        return apiGet('observations?sessionId=' + encodeURIComponent(sessionId(s)) + '&limit=500');
       }));
       obsResults.forEach(function(r) {
         if (r && r.observations) allObs = allObs.concat(r.observations);
@@ -2951,8 +2967,9 @@
 
       panel.innerHTML = '<div class="detail-panel"><h3>Loading session details…</h3></div>';
 
-      var obsRes = await apiGet('observations?sessionId=' + encodeURIComponent(id));
+      var obsRes = await apiGet('observations?sessionId=' + encodeURIComponent(id) + '&limit=1000');
       var obs = (obsRes && obsRes.observations) || [];
+      var obsTotal = obsRes && typeof obsRes.total === 'number' ? obsRes.total : obs.length;
 
       var typeCounts = {};
       var toolCounts = {};
@@ -2985,7 +3002,7 @@
       }
 
       html += '<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:10px;margin-bottom:14px;">';
-      html += '<div class="card" style="padding:10px;"><div style="font-size:10px;letter-spacing:0.08em;color:var(--ink-muted);">OBSERVATIONS</div><div style="font-size:20px;font-weight:600;">' + obs.length + '</div></div>';
+      html += '<div class="card" style="padding:10px;"><div style="font-size:10px;letter-spacing:0.08em;color:var(--ink-muted);">OBSERVATIONS</div><div style="font-size:20px;font-weight:600;">' + obsTotal + '</div></div>';
       html += '<div class="card" style="padding:10px;"><div style="font-size:10px;letter-spacing:0.08em;color:var(--ink-muted);">TOOLS USED</div><div style="font-size:20px;font-weight:600;">' + Object.keys(toolCounts).length + '</div></div>';
       html += '<div class="card" style="padding:10px;"><div style="font-size:10px;letter-spacing:0.08em;color:var(--ink-muted);">FILES TOUCHED</div><div style="font-size:20px;font-weight:600;">' + fileSet.size + '</div></div>';
       html += '<div class="card" style="padding:10px;"><div style="font-size:10px;letter-spacing:0.08em;color:var(--ink-muted);">DURATION</div><div style="font-size:20px;font-weight:600;">' + esc(durationLabel) + '</div></div>';
@@ -3494,7 +3511,10 @@
     var wsReconnectTimer = null;
     var wsRetries = 0;
     var WS_MAX_RETRIES = 4;
-    var directFailed = false;
+    // iii 0.11.x streams events through the root websocket after a
+    // join message. The direct /stream/mem-live/viewer path returns
+    // 404 on the pinned engine, so start on the working join path.
+    var directFailed = true;
     var directFailures = 0;
     var DIRECT_FAILURE_THRESHOLD = 2;
     var pollTimer = null;
@@ -3533,7 +3553,7 @@
           if (!ws || ws.readyState !== WebSocket.OPEN) {
             wsRetries = 0;
             directFailures = 0;
-            directFailed = false;
+            directFailed = true;
             connectWs();
           }
         }
@@ -3669,20 +3689,29 @@
     }
 
     function routeWsMessage(msg) {
-      if (state.activeTab === 'timeline' && msg.observation) {
-        if (!state.timeline.sessionId || msg.observation.sessionId === state.timeline.sessionId) {
+      if (msg.observation && state.timeline.sessionId && msg.observation.sessionId === state.timeline.sessionId) {
+        if (state.activeTab === 'timeline') {
           var existing = state.timeline.observations.findIndex(function(o) { return o.id === msg.observation.id; });
-          if (existing >= 0) {
-            state.timeline.observations[existing] = msg.observation;
+          if (state.timeline.page === 0) {
+            if (existing >= 0) {
+              state.timeline.observations[existing] = msg.observation;
+            } else {
+              state.timeline.total = (state.timeline.total || state.timeline.observations.length) + 1;
+              state.timeline.observations.unshift(msg.observation);
+              if (state.timeline.observations.length > state.timeline.pageSize) {
+                state.timeline.observations = state.timeline.observations.slice(0, state.timeline.pageSize);
+              }
+            }
+            renderObservations();
           } else {
-            state.timeline.observations.unshift(msg.observation);
+            loadObservations();
           }
-          renderObservations();
+        } else if (state.timeline.loaded) {
+          state.timeline.loaded = false;
         }
       }
       if (state.activeTab === 'dashboard') {
-        state.dashboard.loaded = false;
-        loadDashboard();
+        scheduleDashboardRefresh();
       }
       if (state.activeTab === 'activity' && msg.observation) {
         state.activity.observations.unshift(msg.observation);
