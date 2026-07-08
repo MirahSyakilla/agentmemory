@@ -155,6 +155,7 @@ describe("mem::summarize chunking", () => {
     delete process.env.SUMMARIZE_CHUNK_SIZE;
     delete process.env.SUMMARIZE_CHUNK_CONCURRENCY;
     delete process.env.SUMMARIZE_MAX_CHUNKS;
+    delete process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE;
   });
 
   afterEach(() => {
@@ -276,6 +277,7 @@ describe("mem::summarize chunking", () => {
   it("persistently-broken chunk is skipped, reduce still runs on remaining partials", async () => {
     process.env.SUMMARIZE_CHUNK_SIZE = "100";
     process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE = "100";
     const provider = makeProvider([
       summaryXml({ title: "ok1" }),
       "<garbage/>", "<garbage/>",   // chunk 2: both attempts parse-fail
@@ -305,9 +307,41 @@ describe("mem::summarize chunking", () => {
     expect(stored?.title).toBe("merged-with-skip");
   });
 
+  it("splits a failed chunk into smaller retries before giving up", async () => {
+    process.env.SUMMARIZE_CHUNK_SIZE = "100";
+    process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE = "50";
+    const provider = makeProvider([
+      summaryXml({ title: "ok1" }),
+      "<garbage/>", "<garbage/>",   // chunk 2 at size 100 fails both tries
+      summaryXml({ title: "ok2a" }), // chunk 2 left half at size 50
+      summaryXml({ title: "ok2b" }), // chunk 2 right half at size 50
+      summaryXml({ title: "ok3" }),
+      summaryXml({ title: "merged-after-split" }),
+    ]);
+    const { handler, kv } = await setupHandler({
+      sessionId: "ses_split",
+      obsCount: 250,
+      provider,
+    });
+
+    const result: any = await handler({ sessionId: "ses_split" });
+
+    expect(result.success).toBe(true);
+    expect(provider.calls).toHaveLength(7);
+    const reduceCall = provider.calls[6];
+    expect(reduceCall.user).toContain("obs 1-100");
+    expect(reduceCall.user).toContain("obs 101-150");
+    expect(reduceCall.user).toContain("obs 151-200");
+    expect(reduceCall.user).toContain("obs 201-250");
+    const stored: any = await kv.get("summaries", "ses_split");
+    expect(stored?.title).toBe("merged-after-split");
+  });
+
   it("too many skipped chunks bails out with a clear error", async () => {
     process.env.SUMMARIZE_CHUNK_SIZE = "100";
     process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE = "100";
     // 3 chunks, 2 fully broken → >50% skipped → bail.
     const provider = makeProvider([
       summaryXml({ title: "ok1" }),
@@ -329,6 +363,7 @@ describe("mem::summarize chunking", () => {
   it("provider error on one chunk after retry is skipped, not propagated", async () => {
     process.env.SUMMARIZE_CHUNK_SIZE = "100";
     process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE = "100";
     let i = 0;
     const provider: MemoryProvider & { calls: any[] } = {
       name: "test",
@@ -362,6 +397,7 @@ describe("mem::summarize chunking", () => {
   it("every chunk failing on provider error trips too_many_chunks_skipped", async () => {
     process.env.SUMMARIZE_CHUNK_SIZE = "100";
     process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE = "100";
     // 3 chunks, all chunk calls throw → 3/3 skipped → bail.
     const provider: MemoryProvider & { calls: any[] } = {
       name: "test",
@@ -387,6 +423,7 @@ describe("mem::summarize chunking", () => {
   it("uses a deterministic fallback for imported sessions when chunk summarization collapses", async () => {
     process.env.SUMMARIZE_CHUNK_SIZE = "100";
     process.env.SUMMARIZE_CHUNK_CONCURRENCY = "1";
+    process.env.SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE = "100";
     const provider: MemoryProvider & { calls: any[] } = {
       name: "test",
       calls: [],

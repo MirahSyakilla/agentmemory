@@ -1435,6 +1435,9 @@ Create `~/.agentmemory/.env`:
 # BM25_WEIGHT=0.4
 # VECTOR_WEIGHT=0.6
 # TOKEN_BUDGET=2000
+# SUMMARIZE_CHUNK_SIZE=400                  # Large session summaries are chunked before the final reduce step
+# SUMMARIZE_CHUNK_CONCURRENCY=6             # Parallel chunk LLM calls during chunked summarize
+# SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE=50      # If a chunk fails twice, split and retry down to this size before skipping
 
 # Backend storage (mandatory service stack)
 # AGENTMEMORY_QDRANT_URL=http://127.0.0.1:6333

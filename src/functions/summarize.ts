@@ -21,6 +21,7 @@ import { scoreSummary } from "../eval/quality.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { safeAudit } from "./audit.js";
 import { logger } from "../logger.js";
+import { getEnvVar } from "../config.js";
 
 // Per-chunk observation budget when a session is too large to fit in one
 // LLM call. Default ≈ 50k input tokens per chunk at ~110 tok/obs — fits
@@ -34,6 +35,7 @@ const CHUNK_SIZE_DEFAULT = 400;
 // SUMMARIZE_CHUNK_CONCURRENCY higher to cover ~1000+ chunk sessions.
 const CHUNK_CONCURRENCY_DEFAULT = 6;
 const MAX_CHUNKS_DEFAULT = 20;
+const ADAPTIVE_MIN_CHUNK_SIZE_DEFAULT = 50;
 // Bail on the merged summary if more than this fraction of chunks fail
 // to parse — a half-blind narrative is worse than a clean error.
 const MAX_SKIP_RATIO = 0.5;
@@ -50,25 +52,38 @@ const GENERIC_SUMMARY_TITLES = new Set([
 ]);
 
 function getChunkSize(): number {
-  const raw = process.env.SUMMARIZE_CHUNK_SIZE;
+  const raw = getEnvVar("SUMMARIZE_CHUNK_SIZE");
   if (!raw) return CHUNK_SIZE_DEFAULT;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : CHUNK_SIZE_DEFAULT;
 }
 
 function getChunkConcurrency(): number {
-  const raw = process.env.SUMMARIZE_CHUNK_CONCURRENCY;
+  const raw = getEnvVar("SUMMARIZE_CHUNK_CONCURRENCY");
   if (!raw) return CHUNK_CONCURRENCY_DEFAULT;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : CHUNK_CONCURRENCY_DEFAULT;
 }
 
 function getMaxChunks(): number {
-  const raw = process.env.SUMMARIZE_MAX_CHUNKS;
+  const raw = getEnvVar("SUMMARIZE_MAX_CHUNKS");
   if (!raw) return MAX_CHUNKS_DEFAULT;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : MAX_CHUNKS_DEFAULT;
 }
+
+function getAdaptiveMinChunkSize(): number {
+  const raw = getEnvVar("SUMMARIZE_ADAPTIVE_MIN_CHUNK_SIZE");
+  if (!raw) return ADAPTIVE_MIN_CHUNK_SIZE_DEFAULT;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : ADAPTIVE_MIN_CHUNK_SIZE_DEFAULT;
+}
+
+type PartialSummary = {
+  summary: SessionSummary;
+  obsRangeStart: number;
+  obsRangeEnd: number;
+};
 
 // One chunk call with retry-once. Returns null when both attempts fail —
 // whether by parse failure, provider 4xx (content rejected by upstream
@@ -84,7 +99,9 @@ async function summarizeChunkWithRetry(
   project: string,
   idx: number,
   total: number,
-): Promise<SessionSummary | null> {
+  rangeStart: number,
+  minChunkSize: number,
+): Promise<PartialSummary[]> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const xml = await provider.summarize(
@@ -92,22 +109,60 @@ async function summarizeChunkWithRetry(
         buildSummaryPrompt(chunk),
       );
       const parsed = parseSummaryXml(xml, sessionId, project, chunk.length);
-      if (parsed) return parsed;
+      if (parsed) {
+        return [{
+          summary: parsed,
+          obsRangeStart: rangeStart,
+          obsRangeEnd: rangeStart + chunk.length - 1,
+        }];
+      }
       logger.warn("Summarize chunk parse failed", {
         sessionId,
         chunk: `${idx + 1}/${total}`,
         attempt,
+        observations: chunk.length,
       });
     } catch (err) {
       logger.warn("Summarize chunk LLM call failed", {
         sessionId,
         chunk: `${idx + 1}/${total}`,
         attempt,
+        observations: chunk.length,
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
-  return null;
+  if (chunk.length <= minChunkSize) return [];
+
+  const midpoint = Math.ceil(chunk.length / 2);
+  logger.warn("Summarize chunk failed; retrying with smaller chunks", {
+    sessionId,
+    chunk: `${idx + 1}/${total}`,
+    observations: chunk.length,
+    nextChunkSizes: [midpoint, chunk.length - midpoint],
+    minChunkSize,
+  });
+  const left = await summarizeChunkWithRetry(
+    provider,
+    chunk.slice(0, midpoint),
+    sessionId,
+    project,
+    idx,
+    total,
+    rangeStart,
+    minChunkSize,
+  );
+  const right = await summarizeChunkWithRetry(
+    provider,
+    chunk.slice(midpoint),
+    sessionId,
+    project,
+    idx,
+    total,
+    rangeStart + midpoint,
+    minChunkSize,
+  );
+  return [...left, ...right];
 }
 
 // Returns the final summary XML string. For sessions ≤ chunk size, this is
@@ -140,18 +195,22 @@ async function produceSummaryXml(
     chunks.push(compressed.slice(i, i + chunkSize));
   }
   const concurrency = getChunkConcurrency();
+  const minChunkSize = getAdaptiveMinChunkSize();
   logger.info("Summarize chunking session", {
     sessionId,
     chunks: chunks.length,
     chunkSize,
     concurrency,
+    adaptiveMinChunkSize: minChunkSize,
     totalObservations: compressed.length,
   });
 
   // Sparse array preserves chunk → index mapping after parallel resolution,
   // so the reduce step sees partials in chronological order even when some
   // were skipped.
-  const partialByIdx: Array<SessionSummary | null> = new Array(chunks.length).fill(null);
+  const partialByIdx: Array<PartialSummary[]> = new Array(chunks.length)
+    .fill(null)
+    .map(() => []);
   for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
     const batch = chunks.slice(batchStart, batchStart + concurrency);
     await Promise.all(
@@ -164,13 +223,15 @@ async function produceSummaryXml(
           project,
           idx,
           chunks.length,
+          idx * chunkSize + 1,
+          minChunkSize,
         );
       }),
     );
   }
 
-  const skipped = partialByIdx.filter((p) => p === null).length;
-  const partials = partialByIdx.filter((p): p is SessionSummary => p !== null);
+  const skipped = partialByIdx.filter((p) => p.length === 0).length;
+  const partials = partialByIdx.flat();
 
   if (skipped > Math.floor(chunks.length * MAX_SKIP_RATIO)) {
     throw new Error(
@@ -185,18 +246,15 @@ async function produceSummaryXml(
     });
   }
 
-  const reduceInput = partials.map((p) => {
-    const originalIdx = partialByIdx.indexOf(p);
-    return {
-      title: p.title,
-      narrative: p.narrative,
-      keyDecisions: p.keyDecisions,
-      filesModified: p.filesModified,
-      concepts: p.concepts,
-      obsRangeStart: originalIdx * chunkSize + 1,
-      obsRangeEnd: Math.min((originalIdx + 1) * chunkSize, compressed.length),
-    };
-  });
+  const reduceInput = partials.map((p) => ({
+    title: p.summary.title,
+    narrative: p.summary.narrative,
+    keyDecisions: p.summary.keyDecisions,
+    filesModified: p.summary.filesModified,
+    concepts: p.summary.concepts,
+    obsRangeStart: p.obsRangeStart,
+    obsRangeEnd: p.obsRangeEnd,
+  }));
   const response = await provider.summarize(
     REDUCE_SYSTEM,
     buildReducePrompt(reduceInput),
