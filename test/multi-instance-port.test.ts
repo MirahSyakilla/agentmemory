@@ -15,7 +15,7 @@ describe("multi-instance port auto-derive (#750)", () => {
   beforeEach(() => {
     for (const k of PORT_ENVS) {
       saved[k] = process.env[k];
-      delete process.env[k];
+      process.env[k] = "";
     }
   });
 

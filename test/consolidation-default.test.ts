@@ -7,8 +7,8 @@ const ENV_KEYS = [
   "CONSOLIDATION_ENABLED",
   "AGENTMEMORY_PROVIDER",
   "ANTHROPIC_API_KEY",
-  "OPENAI_API_KEY",
-  "OPENAI_API_KEY_FOR_LLM",
+  "OPENAI_SUMMARIZE_API_KEY",
+  "OPENAI_LLM_API_KEY",
   "OPENROUTER_API_KEY",
   "GEMINI_API_KEY",
   "GOOGLE_API_KEY",
@@ -68,16 +68,16 @@ describe("isConsolidationEnabled default behavior", () => {
     expect(cfg.isConsolidationEnabled()).toBe(true);
   });
 
-  it("returns true by default when OPENAI_API_KEY is set", async () => {
-    writeEnv("OPENAI_API_KEY=sk-test-123");
+  it("returns true by default when OPENAI_SUMMARIZE_API_KEY is set", async () => {
+    writeEnv("OPENAI_SUMMARIZE_API_KEY=sk-test-123");
     const cfg = await freshConfig();
     expect(cfg.isConsolidationEnabled()).toBe(true);
   });
 
-  it("returns true by default when OPENAI_BASE_URL is set (local OpenAI-compatible)", async () => {
+  it("returns false by default when only OPENAI_BASE_URL is set", async () => {
     writeEnv("OPENAI_BASE_URL=http://localhost:1234/v1");
     const cfg = await freshConfig();
-    expect(cfg.isConsolidationEnabled()).toBe(true);
+    expect(cfg.isConsolidationEnabled()).toBe(false);
   });
 
   it("returns true by default when AGENTMEMORY_PROVIDER=agent-sdk", async () => {
@@ -104,8 +104,8 @@ describe("isConsolidationEnabled default behavior", () => {
     expect(cfg.isConsolidationEnabled()).toBe(false);
   });
 
-  it("OPENAI_API_KEY_FOR_LLM=false scopes the key to embeddings only", async () => {
-    writeEnv("OPENAI_API_KEY=sk-test-123\nOPENAI_API_KEY_FOR_LLM=false");
+  it("embedding-only OpenAI key does not enable consolidation", async () => {
+    writeEnv("OPENAI_EMBEDDING_API_KEY=sk-test-123");
     const cfg = await freshConfig();
     expect(cfg.isConsolidationEnabled()).toBe(false);
   });

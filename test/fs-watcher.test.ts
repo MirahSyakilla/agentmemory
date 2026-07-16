@@ -149,7 +149,7 @@ describe("FilesystemWatcher", { retry: 2 }, () => {
     writeFileSync(
       join(root, ".env"),
       [
-        "OPENAI_API_KEY=sk-test-secret-value",
+        "OPENAI_SUMMARIZE_API_KEY=sk-test-secret-value",
         "PUBLIC_FLAG=enabled",
         "AUTHORIZATION=Bearer live-token-value",
       ].join("\n"),
@@ -164,7 +164,7 @@ describe("FilesystemWatcher", { retry: 2 }, () => {
 
     expect(captured).toHaveLength(1);
     const content = (captured[0].body as { data: { content: string } }).data.content;
-    expect(content).toContain("OPENAI_API_KEY=[REDACTED]");
+    expect(content).toContain("OPENAI_SUMMARIZE_API_KEY=[REDACTED]");
     expect(content).toContain("PUBLIC_FLAG=enabled");
     expect(content).toContain("AUTHORIZATION=[REDACTED]");
     expect(content).not.toContain("sk-test-secret-value");

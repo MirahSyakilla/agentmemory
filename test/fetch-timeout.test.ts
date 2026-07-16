@@ -207,8 +207,8 @@ describe("Provider hang regression — OpenRouterEmbeddingProvider", () => {
 // ─────────────────────────────────────────────────────────────
 describe("OpenAIProvider timeout env precedence (#446)", () => {
   beforeEach(() => {
-    delete process.env["OPENAI_TIMEOUT_MS"];
-    delete process.env["AGENTMEMORY_LLM_TIMEOUT_MS"];
+    process.env["OPENAI_TIMEOUT_MS"] = "";
+    process.env["AGENTMEMORY_LLM_TIMEOUT_MS"] = "";
     vi.spyOn(globalThis, "fetch").mockImplementation(hangingFetch as typeof fetch);
   });
   afterEach(() => {
@@ -345,6 +345,10 @@ describe("OpenAIProvider thinking-model fallback (#627)", () => {
 });
 
 describe("OpenAIProvider Responses API transport", () => {
+  beforeEach(() => {
+    process.env["OPENAI_FALLBACK_BASE_URL"] = "";
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env["OPENAI_FALLBACK_BASE_URL"];

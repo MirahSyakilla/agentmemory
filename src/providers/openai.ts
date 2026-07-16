@@ -1,5 +1,9 @@
 import type { MemoryProvider } from "../types.js";
-import { getEnvVar } from "../config.js";
+import {
+  getEnvVar,
+  getOpenAILlmBaseUrl,
+  getOpenAILlmFallbackBaseUrl,
+} from "../config.js";
 import { fetchWithTimeout } from "./_fetch.js";
 import {
   DEFAULT_AZURE_API_VERSION,
@@ -29,12 +33,18 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  *   - Any other proxy implementing /v1/responses
  *
  * Required env vars:
- *   OPENAI_API_KEY  — API key
+ *   OPENAI_SUMMARIZE_API_KEY — summarize/compress API key
+ *                              (OPENAI_LLM_API_KEY is accepted as an alias).
  *
  * Optional:
- *   OPENAI_BASE_URL          — base URL without path (default: https://api.openai.com).
+ *   OPENAI_BASE_URL          — shared OpenAI-compatible base URL without path
+ *                              (default: https://api.openai.com).
  *                              Azure: https://<resource>.openai.azure.com/openai/deployments/<deployment>
- *   OPENAI_MODEL             — model name (default: gpt-4o-mini)
+ *   OPENAI_FALLBACK_BASE_URL — shared alternate OpenAI-compatible base URL
+ *                              retried on transient failures. MuskAPI primary
+ *                              still auto-falls back to api-slb.muskapi.cc.
+ *   OPENAI_SUMMARIZE_MODEL   — model name (default: gpt-4o-mini)
+ *                              OPENAI_LLM_MODEL / OPENAI_MODEL are accepted as aliases.
  *   OPENAI_API_VERSION       — Azure api-version query param (default: 2024-08-01-preview)
  *   OPENAI_TIMEOUT_MS        — outbound fetch timeout in ms (OpenAI-scoped alias,
  *                              takes precedence over AGENTMEMORY_LLM_TIMEOUT_MS
@@ -63,10 +73,10 @@ export class OpenAIProvider implements MemoryProvider {
     this.apiKey = apiKey;
     this.model = model;
     this.maxTokens = maxTokens;
-    this.baseUrl = normalizeBaseUrl(baseURL || getEnvVar("OPENAI_BASE_URL"));
+    this.baseUrl = normalizeBaseUrl(baseURL || getOpenAILlmBaseUrl());
     this.fallbackBaseUrl = resolveAlternateBaseUrl(
       this.baseUrl,
-      getEnvVar("OPENAI_FALLBACK_BASE_URL"),
+      getOpenAILlmFallbackBaseUrl(),
     );
     this.reasoningEffort = getEnvVar("OPENAI_REASONING_EFFORT") || undefined;
     this.timeoutMs = resolveTimeout();

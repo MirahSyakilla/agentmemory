@@ -55,16 +55,42 @@ function hasRealValue(v: string | undefined): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
+function resolveOpenAILlmApiKeyFrom(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  return [env["OPENAI_SUMMARIZE_API_KEY"], env["OPENAI_LLM_API_KEY"]].find(
+    hasRealValue,
+  );
+}
+
+function resolveOpenAILlmModelFrom(
+  env: Record<string, string | undefined>,
+): string {
+  return (
+    env["OPENAI_SUMMARIZE_MODEL"] ||
+    env["OPENAI_LLM_MODEL"] ||
+    env["OPENAI_MODEL"] ||
+    "gpt-4o-mini"
+  );
+}
+
+function resolveOpenAILlmBaseUrlFrom(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  return env["OPENAI_BASE_URL"];
+}
+
 function detectProvider(env: Record<string, string>): ProviderConfig {
   const maxTokens = parseInt(env["MAX_TOKENS"] || "4096", 10);
+  const openaiLlmApiKey = resolveOpenAILlmApiKeyFrom(env);
 
   // OpenAI-compatible: supports OpenAI, DeepSeek, SiliconFlow, Azure, vLLM, LM Studio
-  if (hasRealValue(env["OPENAI_API_KEY"]) && env["OPENAI_API_KEY_FOR_LLM"] !== "false") {
+  if (hasRealValue(openaiLlmApiKey)) {
     return {
       provider: "openai",
-      model: env["OPENAI_MODEL"] || "gpt-4o-mini",
+      model: resolveOpenAILlmModelFrom(env),
       maxTokens,
-      baseURL: env["OPENAI_BASE_URL"],
+      baseURL: resolveOpenAILlmBaseUrlFrom(env),
     };
   }
 
@@ -133,7 +159,7 @@ function detectProvider(env: Record<string, string>): ProviderConfig {
   if (!allowAgentSdk) {
     process.stderr.write(
       "[agentmemory] No LLM provider key found " +
-        "(ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY, OPENAI_API_KEY). " +
+        "(ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY, OPENAI_SUMMARIZE_API_KEY). " +
         "LLM-backed compression and summarization are DISABLED — using no-op provider. " +
         "This is the safe default: the agent-sdk fallback used to spawn Claude Agent SDK " +
         "child sessions which inherit Claude Code's plugin hooks and cause infinite Stop-hook " +
@@ -202,6 +228,22 @@ function getMergedEnv(
 
 export function getEnvVar(key: string): string | undefined {
   return getMergedEnv()[key];
+}
+
+export function getOpenAILlmApiKey(): string | undefined {
+  return resolveOpenAILlmApiKeyFrom(getMergedEnv());
+}
+
+export function getOpenAILlmBaseUrl(): string | undefined {
+  return resolveOpenAILlmBaseUrlFrom(getMergedEnv());
+}
+
+export function getOpenAILlmFallbackBaseUrl(): string | undefined {
+  return getMergedEnv()["OPENAI_FALLBACK_BASE_URL"];
+}
+
+export function getOpenAILlmModel(): string {
+  return resolveOpenAILlmModelFrom(getMergedEnv());
 }
 
 export function isDropStaleIndexEnabled(): boolean {
@@ -424,8 +466,7 @@ export function detectLlmProviderKind(): "llm" | "noop" {
     hasRealValue(env["GOOGLE_API_KEY"]) ||
     hasRealValue(env["OPENROUTER_API_KEY"]) ||
     hasRealValue(env["MINIMAX_API_KEY"]) ||
-    (hasRealValue(env["OPENAI_API_KEY"]) &&
-      env["OPENAI_API_KEY_FOR_LLM"] !== "false")
+    hasRealValue(resolveOpenAILlmApiKeyFrom(env))
   ) {
     return "llm";
   }
@@ -455,7 +496,7 @@ export function detectEmbeddingProvider(
   if (forced) return forced;
 
   if (source["GEMINI_API_KEY"]) return "gemini";
-  if (source["OPENAI_API_KEY"]) return "openai";
+  if (source["OPENAI_EMBEDDING_API_KEY"]) return "openai";
   if (source["VOYAGE_API_KEY"]) return "voyage";
   if (source["COHERE_API_KEY"]) return "cohere";
   if (source["OPENROUTER_API_KEY"]) return "openrouter";
@@ -581,9 +622,7 @@ export function isConsolidationEnabled(): boolean {
 function hasLLMProviderConfigured(env: Record<string, string | undefined>): boolean {
   const provider = (env["AGENTMEMORY_PROVIDER"] || "").toLowerCase();
   if (provider === "noop") return false;
-  const openaiKeyForLlm =
-    env["OPENAI_API_KEY"] &&
-    (env["OPENAI_API_KEY_FOR_LLM"] || "").toLowerCase() !== "false";
+  const openaiKeyForLlm = resolveOpenAILlmApiKeyFrom(env);
   return Boolean(
     env["ANTHROPIC_API_KEY"] ||
       openaiKeyForLlm ||
@@ -591,7 +630,6 @@ function hasLLMProviderConfigured(env: Record<string, string | undefined>): bool
       env["GEMINI_API_KEY"] ||
       env["GOOGLE_API_KEY"] ||
       env["MINIMAX_API_KEY"] ||
-      env["OPENAI_BASE_URL"] ||
       provider === "agent-sdk",
   );
 }

@@ -44,7 +44,9 @@ describe("evaluateHealth memory severity", () => {
         external: 0,
       },
     });
-    const { status, alerts } = evaluateHealth(s);
+    const { status, alerts } = evaluateHealth(s, {
+      memoryRssFloorBytes: 512 * 1024 * 1024,
+    });
     expect(status).toBe("critical");
     expect(alerts.some((a) => a.startsWith("memory_critical_"))).toBe(true);
   });

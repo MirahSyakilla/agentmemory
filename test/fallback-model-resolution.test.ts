@@ -75,8 +75,11 @@ import type { ProviderConfig, FallbackConfig } from "../src/types.js";
 describe("Fallback provider model resolution (#778)", () => {
   const savedEnv: Record<string, string | undefined> = {};
   const envKeys = [
-    "OPENAI_API_KEY",
+    "OPENAI_SUMMARIZE_API_KEY",
+    "OPENAI_LLM_API_KEY",
     "OPENAI_MODEL",
+    "OPENAI_SUMMARIZE_MODEL",
+    "OPENAI_LLM_MODEL",
     "GEMINI_API_KEY",
     "GEMINI_MODEL",
     "GOOGLE_API_KEY",
@@ -92,7 +95,7 @@ describe("Fallback provider model resolution (#778)", () => {
     captured.length = 0;
     for (const k of envKeys) {
       savedEnv[k] = process.env[k];
-      delete process.env[k];
+      process.env[k] = "";
     }
   });
 
@@ -104,7 +107,7 @@ describe("Fallback provider model resolution (#778)", () => {
   });
 
   it("primary OpenAI + fallback Gemini: Gemini is built with GEMINI_MODEL, NOT the primary's model", () => {
-    process.env.OPENAI_API_KEY = "sk-openai";
+    process.env.OPENAI_SUMMARIZE_API_KEY = "sk-openai";
     process.env.GEMINI_API_KEY = "gemini-key";
     process.env.GEMINI_MODEL = "gemini-2.5-flash";
 
@@ -125,7 +128,7 @@ describe("Fallback provider model resolution (#778)", () => {
   });
 
   it("Gemini fallback uses the documented default when GEMINI_MODEL is unset", () => {
-    process.env.OPENAI_API_KEY = "sk-openai";
+    process.env.OPENAI_SUMMARIZE_API_KEY = "sk-openai";
     process.env.GEMINI_API_KEY = "gemini-key";
 
     createFallbackProvider(
@@ -139,7 +142,7 @@ describe("Fallback provider model resolution (#778)", () => {
 
   it("primary Anthropic + fallback OpenAI + Minimax: each fallback uses its own default", () => {
     process.env.ANTHROPIC_API_KEY = "anth-key";
-    process.env.OPENAI_API_KEY = "openai-key";
+    process.env.OPENAI_SUMMARIZE_API_KEY = "openai-key";
     process.env.OPENAI_MODEL = "gpt-5";
     process.env.MINIMAX_API_KEY = "mini-key";
 
@@ -162,7 +165,7 @@ describe("Fallback provider model resolution (#778)", () => {
   });
 
   it("env override on the fallback provider's MODEL var wins over the default", () => {
-    process.env.OPENAI_API_KEY = "sk";
+    process.env.OPENAI_SUMMARIZE_API_KEY = "sk";
     process.env.GEMINI_API_KEY = "gk";
     process.env.GEMINI_MODEL = "gemini-2.5-pro";
 
@@ -177,7 +180,7 @@ describe("Fallback provider model resolution (#778)", () => {
   });
 
   it("fallback that matches the primary provider is skipped (no duplicate)", () => {
-    process.env.OPENAI_API_KEY = "sk";
+    process.env.OPENAI_SUMMARIZE_API_KEY = "sk";
 
     createFallbackProvider(
       { provider: "openai", model: "gpt-4o-mini", maxTokens: 4096 },

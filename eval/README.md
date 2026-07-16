@@ -12,7 +12,7 @@ Two families, both reproducible:
 | Adapter | Backend | API key needed |
 |---|---|---|
 | `grep` | Tokenized substring match | none |
-| `vector` | OpenAI `text-embedding-3-small` + cosine | `OPENAI_API_KEY` |
+| `vector` | OpenAI `text-embedding-3-small` + cosine | `OPENAI_EMBEDDING_API_KEY` |
 | `agentmemory` | Running agentmemory server, smart-search endpoint | none (auth optional via `AGENTMEMORY_SECRET`) |
 
 ## Sandbox first
@@ -44,7 +44,7 @@ npm run eval:coding-life -- --adapters grep
 
 # add agentmemory + vector (sandbox + OpenAI key)
 source eval/scripts/sandbox.sh
-OPENAI_API_KEY=sk-... npm run eval:coding-life -- --adapters grep,vector,agentmemory
+OPENAI_EMBEDDING_API_KEY=sk-... npm run eval:coding-life -- --adapters grep,vector,agentmemory
 ```
 
 ### LongMemEval `_s` (public, 278MB download)
@@ -57,11 +57,11 @@ curl -Lo ~/datasets/longmemeval/longmemeval_s.json \
 source eval/scripts/sandbox.sh
 
 # Stratified sample of 10 per type (fast iteration, ~$0.20 OpenAI cost)
-OPENAI_API_KEY=sk-... LONGMEMEVAL_PATH=~/datasets/longmemeval/longmemeval_s.json \
+OPENAI_EMBEDDING_API_KEY=sk-... LONGMEMEVAL_PATH=~/datasets/longmemeval/longmemeval_s.json \
   npm run eval:longmemeval -- --stratify 10
 
 # Full 500 questions × 3 adapters (~$2 OpenAI cost)
-OPENAI_API_KEY=sk-... LONGMEMEVAL_PATH=~/datasets/longmemeval/longmemeval_s.json \
+OPENAI_EMBEDDING_API_KEY=sk-... LONGMEMEVAL_PATH=~/datasets/longmemeval/longmemeval_s.json \
   npm run eval:longmemeval
 ```
 

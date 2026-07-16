@@ -53,7 +53,7 @@ function resolveDimensions(model: string, override: string | undefined): number 
  * `api-key` header instead of `Authorization: Bearer`.
  *
  * Required env vars:
- *   OPENAI_API_KEY               — API key (fallback for OPENAI_EMBEDDING_API_KEY)
+ *   OPENAI_EMBEDDING_API_KEY     — embedding API key
  *
  * Optional:
  *   OPENAI_BASE_URL              — base URL without path (default: https://api.openai.com).
@@ -67,11 +67,6 @@ function resolveDimensions(model: string, override: string | undefined): number 
  *                                  completions on a rate-limited but high-quality
  *                                  hosted provider. Azure detection runs on
  *                                  whichever URL ends up selected.
- *   OPENAI_EMBEDDING_API_KEY     — separate API key for the embedding endpoint
- *                                  (defaults to OPENAI_API_KEY). Useful when the
- *                                  embedding endpoint requires a different key
- *                                  or no key at all (set to e.g. "local" for
- *                                  endpoints that ignore Authorization).
  *   OPENAI_API_VERSION           — Azure api-version query param (default: 2024-08-01-preview)
  *   OPENAI_EMBEDDING_MODEL       — model name (default: text-embedding-3-small)
  *   OPENAI_EMBEDDING_DIMENSIONS  — override reported dimensions (required for
@@ -90,17 +85,10 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   private azureApiVersion: string;
 
   constructor(apiKey?: string) {
-    // Separate API key path: caller-passed wins, then OPENAI_EMBEDDING_API_KEY,
-    // then fall back to OPENAI_API_KEY. Allows e.g. a placeholder key for
-    // local endpoints that ignore Authorization (most do).
-    this.apiKey =
-      apiKey ||
-      getEnvVar("OPENAI_EMBEDDING_API_KEY") ||
-      getEnvVar("OPENAI_API_KEY") ||
-      "";
+    this.apiKey = apiKey || getEnvVar("OPENAI_EMBEDDING_API_KEY") || "";
     if (!this.apiKey) {
       throw new Error(
-        "API key is required (via constructor, OPENAI_EMBEDDING_API_KEY, or OPENAI_API_KEY)",
+        "API key is required (via constructor or OPENAI_EMBEDDING_API_KEY)",
       );
     }
     // Embedding-specific base URL override; falls back to OPENAI_BASE_URL,

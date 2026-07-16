@@ -12,12 +12,13 @@ describe("createEmbeddingProvider", () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    delete process.env["GEMINI_API_KEY"];
-    delete process.env["OPENAI_API_KEY"];
-    delete process.env["VOYAGE_API_KEY"];
-    delete process.env["COHERE_API_KEY"];
-    delete process.env["OPENROUTER_API_KEY"];
-    delete process.env["EMBEDDING_PROVIDER"];
+    process.env["GEMINI_API_KEY"] = "";
+    process.env["OPENAI_EMBEDDING_API_KEY"] = "";
+    process.env["OPENAI_SUMMARIZE_API_KEY"] = "";
+    process.env["VOYAGE_API_KEY"] = "";
+    process.env["COHERE_API_KEY"] = "";
+    process.env["OPENROUTER_API_KEY"] = "";
+    process.env["EMBEDDING_PROVIDER"] = "";
   });
 
   afterEach(() => {
@@ -36,16 +37,22 @@ describe("createEmbeddingProvider", () => {
     expect(provider!.name).toBe("gemini");
   });
 
-  it("returns OpenAIEmbeddingProvider when OPENAI_API_KEY is set", () => {
-    process.env["OPENAI_API_KEY"] = "test-key-456";
+  it("returns OpenAIEmbeddingProvider when OPENAI_EMBEDDING_API_KEY is set", () => {
+    process.env["OPENAI_EMBEDDING_API_KEY"] = "test-key-456";
     const provider = createEmbeddingProvider();
     expect(provider).toBeInstanceOf(OpenAIEmbeddingProvider);
     expect(provider!.name).toBe("openai");
   });
 
+  it("does not auto-detect OpenAI embeddings from the LLM key", () => {
+    process.env["OPENAI_SUMMARIZE_API_KEY"] = "test-key-456";
+    const provider = createEmbeddingProvider();
+    expect(provider).toBeNull();
+  });
+
   it("EMBEDDING_PROVIDER override takes precedence", () => {
     process.env["GEMINI_API_KEY"] = "test-key-123";
-    process.env["OPENAI_API_KEY"] = "test-key-456";
+    process.env["OPENAI_EMBEDDING_API_KEY"] = "test-key-456";
     process.env["EMBEDDING_PROVIDER"] = "openai";
     const provider = createEmbeddingProvider();
     expect(provider).toBeInstanceOf(OpenAIEmbeddingProvider);
@@ -57,13 +64,13 @@ describe("OpenAIEmbeddingProvider", () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    delete process.env["OPENAI_BASE_URL"];
-    delete process.env["OPENAI_EMBEDDING_BASE_URL"];
-    delete process.env["OPENAI_EMBEDDING_API_KEY"];
-    delete process.env["OPENAI_EMBEDDING_MODEL"];
-    delete process.env["OPENAI_EMBEDDING_DIMENSIONS"];
-    delete process.env["OPENAI_FALLBACK_BASE_URL"];
-    delete process.env["OPENAI_EMBEDDING_FALLBACK_BASE_URL"];
+    process.env["OPENAI_BASE_URL"] = "";
+    process.env["OPENAI_EMBEDDING_BASE_URL"] = "";
+    process.env["OPENAI_EMBEDDING_API_KEY"] = "";
+    process.env["OPENAI_EMBEDDING_MODEL"] = "";
+    process.env["OPENAI_EMBEDDING_DIMENSIONS"] = "";
+    process.env["OPENAI_FALLBACK_BASE_URL"] = "";
+    process.env["OPENAI_EMBEDDING_FALLBACK_BASE_URL"] = "";
   });
 
   afterEach(() => {
@@ -77,9 +84,8 @@ describe("OpenAIEmbeddingProvider", () => {
   });
 
   it("throws when no API key is provided", () => {
-    delete process.env["OPENAI_API_KEY"];
-    delete process.env["OPENAI_EMBEDDING_API_KEY"];
-    expect(() => new OpenAIEmbeddingProvider()).toThrow(/API key is required.*OPENAI_EMBEDDING_API_KEY.*OPENAI_API_KEY/);
+    process.env["OPENAI_EMBEDDING_API_KEY"] = "";
+    expect(() => new OpenAIEmbeddingProvider()).toThrow(/API key is required.*OPENAI_EMBEDDING_API_KEY/);
   });
 
   it("respects OPENAI_BASE_URL env var", async () => {

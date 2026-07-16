@@ -77,8 +77,8 @@ function cosine(a: Float32Array, b: Float32Array): number {
 export const vectorAdapter: Adapter<VectorState> = {
   name: "vector",
   async init(sessions) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OPENAI_API_KEY required for vector adapter");
+    const apiKey = process.env.OPENAI_EMBEDDING_API_KEY;
+    if (!apiKey) throw new Error("OPENAI_EMBEDDING_API_KEY required for vector adapter");
     const embeddings: Float32Array[] = new Array(sessions.length);
     const BATCH = 50;
     for (let i = 0; i < sessions.length; i += BATCH) {
@@ -95,8 +95,8 @@ export const vectorAdapter: Adapter<VectorState> = {
     return { sessions, embeddings };
   },
   async query(q, state, k) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OPENAI_API_KEY required for vector adapter");
+    const apiKey = process.env.OPENAI_EMBEDDING_API_KEY;
+    if (!apiKey) throw new Error("OPENAI_EMBEDDING_API_KEY required for vector adapter");
     const qvec = await embed(q, apiKey);
     const scored: RankedDoc[] = state.sessions.map((s, i) => ({
       sessionId: s.id,

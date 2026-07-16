@@ -1270,8 +1270,8 @@ agentmemory auto-detects from your environment. By default, no LLM calls are mad
 | MiniMax | `MINIMAX_API_KEY` | Anthropic-compatible |
 | Gemini | `GEMINI_API_KEY` | Also enables embeddings |
 | OpenRouter | `OPENROUTER_API_KEY` | Any model |
-| OpenAI API | `OPENAI_API_KEY` | Default `gpt-4o-mini`, override with `OPENAI_MODEL` |
-| **Local (Ollama / LM Studio / vLLM / llama.cpp)** | `OPENAI_API_KEY=local` + `OPENAI_BASE_URL=http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio) + `OPENAI_MODEL=<your model>` | Anything OpenAI-API-compatible. Zero cost, runs on your hardware. See [Local models](#local-models-ollama-lm-studio-vllm) below. |
+| OpenAI API | `OPENAI_SUMMARIZE_API_KEY` | Default `gpt-4o-mini`, override with `OPENAI_SUMMARIZE_MODEL` or `OPENAI_MODEL` |
+| **Local (Ollama / LM Studio / vLLM / llama.cpp)** | `OPENAI_SUMMARIZE_API_KEY=local` + `OPENAI_BASE_URL=http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio) + `OPENAI_MODEL=<your model>` | Anything OpenAI-API-compatible. Zero cost, runs on your hardware. See [Local models](#local-models-ollama-lm-studio-vllm) below. |
 | Claude subscription fallback | `AGENTMEMORY_ALLOW_AGENT_SDK=true` | Opt-in only. Spawns `@anthropic-ai/claude-agent-sdk` sessions — used to cause unbounded Stop-hook recursion (#149 follow-up) so it is no longer the default. |
 
 ### Local models (Ollama / LM Studio / vLLM)
@@ -1287,7 +1287,7 @@ ollama serve
 
 ```env
 # ~/.agentmemory/.env
-OPENAI_API_KEY=ollama                          # any non-empty string; Ollama ignores it
+OPENAI_SUMMARIZE_API_KEY=ollama                # any non-empty string; Ollama ignores it
 OPENAI_BASE_URL=http://localhost:11434/v1
 OPENAI_MODEL=qwen2.5-coder:7b
 ```
@@ -1298,12 +1298,12 @@ Open LM Studio → Local Server tab → Start Server. Pick any chat model from t
 
 ```env
 # ~/.agentmemory/.env
-OPENAI_API_KEY=lmstudio                        # any non-empty string; LM Studio ignores it
+OPENAI_SUMMARIZE_API_KEY=lmstudio              # any non-empty string; LM Studio ignores it
 OPENAI_BASE_URL=http://localhost:1234/v1
 OPENAI_MODEL=qwen2.5-coder-7b-instruct         # match the model name from LM Studio
 ```
 
-**vLLM / llama.cpp / Text Generation Inference**: same shape — point `OPENAI_BASE_URL` at whatever URL your server exposes, set `OPENAI_MODEL` to a name your server will accept.
+**vLLM / llama.cpp / Text Generation Inference**: same shape — set `OPENAI_SUMMARIZE_API_KEY` to a non-empty value, point `OPENAI_BASE_URL` at whatever URL your server exposes, and set `OPENAI_MODEL` to a name your server will accept.
 
 **Model picks for memory work**: compression and summarization are short tasks (<2K tokens in, <500 tokens out) where a 7B instruct model is plenty. Recommendations:
 
@@ -1427,11 +1427,9 @@ Create `~/.agentmemory/.env`:
 # GEMINI_API_KEY=...
 # OPENROUTER_API_KEY=...
 # MINIMAX_API_KEY=...
-# OPENAI_API_KEY=***                       # NOTE: this same key auto-activates BOTH the
-#                                          # OpenAI LLM provider (here) AND the OpenAI
-#                                          # embedding provider (further below). Set
-#                                          # OPENAI_API_KEY_FOR_LLM=false to scope it
-#                                          # to embeddings only.
+# OPENAI_SUMMARIZE_API_KEY=***             # OpenAI-compatible LLM key for compress,
+#                                          # summarize, reflection, and consolidation.
+#                                          # OPENAI_LLM_API_KEY is accepted as an alias.
 # OPENAI_BASE_URL=https://api.openai.com   # Optional: override for Azure / vLLM / LM Studio / proxies
 #                                          # Azure: https://<resource>.openai.azure.com/openai/deployments/<deployment>
 #                                          # Auto-detected from `.openai.azure.com` hostname; uses
@@ -1440,7 +1438,8 @@ Create `~/.agentmemory/.env`:
 #                                          # transient failures. For https://api.muskapi.cc this defaults
 #                                          # automatically to https://api-slb.muskapi.cc.
 # OPENAI_API_VERSION=2024-08-01-preview    # Optional: Azure api-version query param
-# OPENAI_MODEL=gpt-4o-mini                 # Optional: default model
+# OPENAI_SUMMARIZE_MODEL=gpt-4o-mini       # Optional: summarize/compress model
+# OPENAI_MODEL=gpt-4o-mini                 # Optional: legacy model alias
 # OPENAI_TIMEOUT_MS=60000                  # Optional: OpenAI-scoped alias for the outbound fetch
 #                                          # timeout. Takes precedence over AGENTMEMORY_LLM_TIMEOUT_MS
 #                                          # for back-compat with v0.9.17. New configs should
@@ -1452,8 +1451,6 @@ Create `~/.agentmemory/.env`:
 #                                          # chat models reject this field with 400. Set to
 #                                          # "none" for thinking models that return reasoning
 #                                          # but no content.
-# OPENAI_API_KEY_FOR_LLM=false             # Optional: set to false to skip OpenAI auto-detection
-#                                          # for LLM (useful if you only want OpenAI for embeddings)
 # Opt-in Claude-subscription fallback (spawns @anthropic-ai/claude-agent-sdk);
 # leave OFF unless you understand the Stop-hook recursion risk (#149 follow-up):
 # AGENTMEMORY_ALLOW_AGENT_SDK=true
@@ -1461,8 +1458,8 @@ Create `~/.agentmemory/.env`:
 # Embedding provider (auto-detected, or override)
 # EMBEDDING_PROVIDER=local
 # VOYAGE_API_KEY=...
-# OPENAI_API_KEY=sk-...
-# OPENAI_BASE_URL=https://api.openai.com   # Override for Azure / vLLM / LM Studio / proxies
+# OPENAI_EMBEDDING_API_KEY=sk-...          # Separate OpenAI-compatible key for embeddings
+# OPENAI_BASE_URL=https://api.openai.com   # Shared OpenAI-compatible base URL for summarize + embeddings
 # OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 # OPENAI_EMBEDDING_DIMENSIONS=1536        # Required when the model is not in the known-models table
 # OPENAI_EMBEDDING_FALLBACK_BASE_URL=     # Optional embedding-specific fallback base URL

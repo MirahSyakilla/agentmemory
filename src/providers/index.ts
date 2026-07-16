@@ -11,7 +11,11 @@ import { OpenAIProvider } from "./openai.js";
 import { OpenRouterProvider } from "./openrouter.js";
 import { ResilientProvider } from "./resilient.js";
 import { FallbackChainProvider } from "./fallback-chain.js";
-import { getEnvVar } from "../config.js";
+import {
+  getEnvVar,
+  getOpenAILlmApiKey,
+  getOpenAILlmModel,
+} from "../config.js";
 
 export { createEmbeddingProvider, createImageEmbeddingProvider } from "./embedding/index.js";
 
@@ -35,7 +39,7 @@ function requireEnvVar(key: string): string {
 function defaultModelFor(providerType: ProviderConfig["provider"]): string {
   switch (providerType) {
     case "openai":
-      return getEnvVar("OPENAI_MODEL") || "gpt-4o-mini";
+      return getOpenAILlmModel();
     case "anthropic":
       return getEnvVar("ANTHROPIC_MODEL") || "claude-sonnet-4-20250514";
     case "gemini":
@@ -130,10 +134,10 @@ function createBaseProvider(config: ProviderConfig): MemoryProvider {
         "https://openrouter.ai/api/v1/chat/completions",
       );
     case "openai": {
-      const openaiKey = getEnvVar("OPENAI_API_KEY");
+      const openaiKey = getOpenAILlmApiKey();
       if (!openaiKey) {
         throw new Error(
-          "OPENAI_API_KEY is required for the openai provider",
+          "OPENAI_SUMMARIZE_API_KEY or OPENAI_LLM_API_KEY is required for the openai provider",
         );
       }
       return new OpenAIProvider(

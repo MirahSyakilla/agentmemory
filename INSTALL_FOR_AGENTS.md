@@ -124,7 +124,7 @@ These are off by default because they spend tokens. Enable them only if the user
 
 - `AGENTMEMORY_INJECT_CONTEXT=true` makes the SessionStart and PreToolUse hooks inject past memory into the agent's context automatically. Cost: spends session tokens proportional to tool-call frequency.
 - `AGENTMEMORY_AUTO_COMPRESS=true` sends each observation to your LLM provider for a richer summary. Cost: spends API tokens proportional to tool-use frequency. Requires a provider key.
-- Provider key: set one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and similar, in the same file. Without a key, agentmemory stays in zero-LLM mode and still indexes and recalls via BM25 plus local embeddings.
+- Provider key: set one of `ANTHROPIC_API_KEY`, `OPENAI_SUMMARIZE_API_KEY`, `GEMINI_API_KEY`, and similar, in the same file. Without a key, agentmemory stays in zero-LLM mode and still indexes and recalls via BM25 plus local embeddings.
 
 ## Tool surface
 

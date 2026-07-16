@@ -45,7 +45,7 @@ Beats grep baseline by +X.Xpt R@5, vector by +X.Xpt R@5.
 ```sh
 git checkout <sha>
 npm install --legacy-peer-deps
-OPENAI_API_KEY=sk-... AGENTMEMORY_BASE_URL=http://localhost:3111 \
+OPENAI_EMBEDDING_API_KEY=sk-... AGENTMEMORY_BASE_URL=http://localhost:3111 \
   npm run eval:longmemeval -- --stratify 10
 ```
 

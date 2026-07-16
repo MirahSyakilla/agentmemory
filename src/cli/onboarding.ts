@@ -50,7 +50,7 @@ const AGENT_GLYPH: Record<string, string> = {
 
 const PROVIDERS: { value: string; label: string; envKey: string | null }[] = [
   { value: "anthropic", label: "Anthropic — claude", envKey: "ANTHROPIC_API_KEY" },
-  { value: "openai", label: "OpenAI — gpt", envKey: "OPENAI_API_KEY" },
+  { value: "openai", label: "OpenAI — gpt", envKey: "OPENAI_SUMMARIZE_API_KEY" },
   { value: "gemini", label: "Google — gemini", envKey: "GEMINI_API_KEY" },
   { value: "openrouter", label: "OpenRouter — multi-model", envKey: "OPENROUTER_API_KEY" },
   { value: "minimax", label: "MiniMax — minimax-m1", envKey: "MINIMAX_API_KEY" },

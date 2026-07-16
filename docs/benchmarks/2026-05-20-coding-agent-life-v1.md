@@ -98,4 +98,4 @@ Outputs land in `eval/reports/coding-life/`: `scores.ndjson` (per-query rows) an
 
 - The single-session-feature tie (`Which PR introduced helm chart support?`) is interesting: query says `PR introduced helm chart` and gold session has `helm chart` literally — grep wins on lexical exactness, hybrid matches but doesn't outperform.
 - The corpus is intentionally small for fast iteration. Hardening targets: paraphrased queries, synonym substitution, in-corpus distractors with shared keywords, longer multi-session chains.
-- Vector adapter not measured here — requires `OPENAI_API_KEY`; will be added in a follow-up scorecard alongside LongMemEval `_s`.
+- Vector adapter not measured here — requires `OPENAI_EMBEDDING_API_KEY`; will be added in a follow-up scorecard alongside LongMemEval `_s`.
