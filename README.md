@@ -93,6 +93,33 @@ Fastest path if you use a coding agent: hand it this one instruction and it inst
 
 On Windows the fast path is WSL2. Native Windows engine setup is manual (about 10 to 20 minutes) and `agentmemory connect` is currently unsupported there. See the [Windows notes](#windows) below for the step-by-step.
 
+agentmemory now uses a mandatory local storage stack. Before starting the server, make sure these services are reachable on their defaults: Postgres on `127.0.0.1:5432`, Qdrant on `127.0.0.1:6333`, and Neo4j on `127.0.0.1:7687`. Tantivy lexical indexes and blob data are created on disk under `~/.agentmemory`.
+
+For a fresh local Docker setup:
+
+```bash
+docker run -d --name agentmemory-postgres \
+  -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_USER=agentmemory \
+  -e POSTGRES_PASSWORD=agentmemory \
+  -e POSTGRES_DB=agentmemory \
+  -v agentmemory-pg:/var/lib/postgresql/data \
+  postgres:16
+
+docker run -d --name agentmemory-qdrant \
+  -p 127.0.0.1:6333:6333 \
+  -v agentmemory-qdrant:/qdrant/storage \
+  qdrant/qdrant:latest
+
+docker run -d --name agentmemory-neo4j \
+  -p 127.0.0.1:7474:7474 \
+  -p 127.0.0.1:7687:7687 \
+  -e NEO4J_AUTH=neo4j/agentmemory \
+  -v agentmemory-neo4j-data:/data \
+  -v agentmemory-neo4j-logs:/logs \
+  neo4j:5
+```
+
 ```bash
 npm install -g @agentmemory/agentmemory          # once — bare `agentmemory` on PATH
 # If you hit EACCES on macOS/Linux system Node installs, retry with:
@@ -374,7 +401,7 @@ Latest release notes: [CHANGELOG.md](CHANGELOG.md).
 </tr>
 <tr>
 <td><strong>External deps</strong></td>
-<td>None (SQLite + iii-engine)</td>
+<td>iii-engine + Postgres + Qdrant + Neo4j</td>
 <td>Qdrant / pgvector</td>
 <td>Postgres + vector DB</td>
 <td>Multiple</td>
@@ -440,9 +467,15 @@ Latest release notes: [CHANGELOG.md](CHANGELOG.md).
 
 <h2 id="quick-start"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-quickstart.svg"><img src="assets/tags/section-quickstart.svg" alt="Quick Start" height="32" /></picture></h2>
 
-Compatibility: this release targets stable `iii-sdk` `^0.11.0` and iii-engine v0.11.x.
+Compatibility: this release pins `iii-sdk` and iii-engine to `0.11.3`.
 
-### Try it in 30 seconds
+### Try it locally
+
+Start the required storage services first, using the Docker commands in [Install](#install) or equivalent local services. The defaults match `.env.example`, so no extra config is needed when you use:
+
+- Postgres: database/user/password `agentmemory`, port `5432`
+- Qdrant: port `6333`, collection auto-created as `agentmemory_vectors`
+- Neo4j: user `neo4j`, password `agentmemory`, Bolt port `7687`
 
 ```bash
 # Terminal 1: start the server
@@ -717,7 +750,17 @@ git clone https://github.com/rohitg00/agentmemory.git && cd agentmemory
 npm install && npm run build && npm start
 ```
 
-This starts agentmemory with a local `iii-engine` if `iii` is already installed, or falls back to Docker Compose if Docker is available. REST, streams, and the viewer bind to `127.0.0.1` by default.
+Before `npm start`, run the storage stack described in [Install](#install), or point these environment variables at existing services:
+
+```bash
+AGENTMEMORY_PG_URL=postgres://agentmemory:agentmemory@127.0.0.1:5432/agentmemory
+AGENTMEMORY_QDRANT_URL=http://127.0.0.1:6333
+AGENTMEMORY_NEO4J_URL=neo4j://127.0.0.1:7687
+AGENTMEMORY_NEO4J_USER=neo4j
+AGENTMEMORY_NEO4J_PASSWORD=agentmemory
+```
+
+`npm start` starts agentmemory with a local `iii-engine` if `iii` is already installed, or falls back to the bundled Docker Compose engine if Docker is available. The Compose file starts iii-engine only; Postgres, Qdrant, and Neo4j are separate required services. REST, streams, and the viewer bind to `127.0.0.1` by default.
 
 Install `iii-engine` manually. **agentmemory currently pins `iii-engine` to `v0.11.3`** — `v0.11.6` introduces a new sandbox-everything-via-`iii worker add` model that agentmemory hasn't been refactored for yet. Pin lifts once the refactor lands. Override with `AGENTMEMORY_III_VERSION=<version>` if you've migrated to the sandbox model manually.
 
@@ -1169,7 +1212,7 @@ If you want long-running traces, change `exporter: memory` to `exporter: otlp` a
 
 <h2 id="powered-by-iii"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-architecture.svg"><img src="assets/tags/section-architecture.svg" alt="Powered by iii" height="32" /></picture></h2>
 
-agentmemory is **already a running [iii](https://iii.dev) instance**. Three primitives — worker, function, trigger — compose the runtime; KV state, streams, and OTEL traces come from iii-state, iii-stream, and iii-observability workers that ship with iii. You didn't install Postgres, Redis, Express, pm2, or Prometheus, because iii replaces them.
+agentmemory is **already a running [iii](https://iii.dev) instance**. Three primitives — worker, function, trigger — compose the runtime; HTTP, streams, worker registration, scheduling, queues, and OTEL traces come from iii workers. Durable memory data is stored in purpose-built backends: Postgres for metadata/session JSON, Qdrant for vectors, Neo4j for graph relationships, Tantivy for lexical search, and the filesystem for blobs.
 
 That means one more command extends agentmemory with an entire new capability.
 
@@ -1204,7 +1247,7 @@ Full registry: [workers.iii.dev](https://workers.iii.dev). Every worker there co
 | Traditional stack | agentmemory uses |
 |---|---|
 | Express.js / Fastify | iii HTTP Triggers |
-| SQLite / Postgres + pgvector | iii KV State + in-memory vector index |
+| SQLite / pgvector-only storage | Postgres metadata + Qdrant vectors + Neo4j graph + Tantivy lexical index |
 | SSE / Socket.io | iii Streams (WebSocket) |
 | pm2 / systemd | iii engine worker supervision |
 | Prometheus / Grafana | iii OTEL + health monitor |
@@ -1514,7 +1557,7 @@ Create `~/.agentmemory/.env`:
 # AGENTMEMORY_TOOLS=core
 ```
 
-agentmemory keeps the same REST, MCP, hook, Codex CLI, and Codex VS Code plugin behavior while using external storage underneath the worker. The default backend stack is Qdrant for vectors, Tantivy for lexical search, Postgres for metadata/session JSON, Neo4j for graph nodes and relationships, and the filesystem for blobs. For a fresh local Postgres install, create the default database once:
+agentmemory keeps the same REST, MCP, hook, Codex CLI, and Codex VS Code plugin behavior while using external storage underneath the worker. The default backend stack is Qdrant for vectors, Tantivy for lexical search, Postgres for metadata/session JSON, Neo4j for graph nodes and relationships, and the filesystem for blobs. The Docker commands in [Install](#install) start all required services with matching default credentials. For a fresh local Postgres install without Docker, create the default database once:
 
 ```bash
 sudo -u postgres psql -c "CREATE ROLE agentmemory WITH LOGIN PASSWORD 'agentmemory';"
@@ -1564,7 +1607,7 @@ npm test                  # 1,423+ tests
 npm run test:integration  # API tests (requires running services)
 ```
 
-**Prerequisites:** Node.js >= 20, [iii-engine](https://iii.dev/docs) or Docker
+**Prerequisites:** Node.js >= 20, [iii-engine](https://iii.dev/docs) or Docker, plus Postgres, Qdrant, and Neo4j running on the configured backend URLs.
 
 <h2 id="license"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-license.svg"><img src="assets/tags/section-license.svg" alt="License" height="32" /></picture></h2>
 
