@@ -1,7 +1,12 @@
 import pg from "pg";
 import type { PostgresConfig } from "../config.js";
 import { KV } from "./schema.js";
-import { applyJsonUpdate, type StateKVBackend } from "./backend-kv.js";
+import {
+  applyJsonUpdate,
+  type StateKVBackend,
+  type StateKVJsonAggregateRequest,
+  type StateKVJsonAggregateResult,
+} from "./backend-kv.js";
 
 const GRAPH_SCOPES = new Set<string>([
   KV.graphNodes,
@@ -96,6 +101,73 @@ export class PostgresKVBackend implements StateKVBackend {
       [scope],
     );
     return res.rows.map((row) => row.value as T);
+  }
+
+  async aggregateJson(
+    request: StateKVJsonAggregateRequest,
+  ): Promise<StateKVJsonAggregateResult> {
+    if (request.scopes.length === 0) {
+      return {
+        count: 0,
+        serializedChars: 0,
+        stringValues: Object.fromEntries(
+          (request.collectStringFields ?? []).map((field) => [field, []]),
+        ),
+      };
+    }
+    await this.ensureReady();
+    const params: unknown[] = [request.scopes];
+    const predicates = ["scope = any($1::text[])"];
+    for (const filter of request.filters ?? []) {
+      params.push(filter.field);
+      const fieldParam = `$${params.length}`;
+      if (filter.operator === "exists") {
+        predicates.push(`value ? ${fieldParam}`);
+        continue;
+      }
+      params.push(JSON.stringify(filter.value));
+      const valueParam = `$${params.length}::jsonb`;
+      if (filter.operator === "equals") {
+        predicates.push(`value -> ${fieldParam} = ${valueParam}`);
+      } else if (filter.operator === "not_equals") {
+        predicates.push(`value -> ${fieldParam} is distinct from ${valueParam}`);
+      } else {
+        predicates.push(
+          `(not (value ? ${fieldParam}) or value -> ${fieldParam} = ${valueParam})`,
+        );
+      }
+    }
+
+    const stringSelections: string[] = [];
+    for (const [index, field] of (request.collectStringFields ?? []).entries()) {
+      params.push(field);
+      const fieldParam = `$${params.length}`;
+      stringSelections.push(
+        `coalesce(array_agg(distinct value ->> ${fieldParam}) filter (` +
+          `where jsonb_typeof(value -> ${fieldParam}) = 'string' and ` +
+          `value ->> ${fieldParam} <> ''), array[]::text[]) as strings_${index}`,
+      );
+    }
+
+    const res = await this.pool.query(
+      `select count(*)::text as count,
+              coalesce(sum(length(value::text)), 0)::text as serialized_chars
+              ${stringSelections.length > 0 ? `, ${stringSelections.join(", ")}` : ""}
+       from agentmemory_kv
+       where ${predicates.join(" and ")}`,
+      params,
+    );
+    const row = res.rows[0] ?? {};
+    return {
+      count: Number(row.count) || 0,
+      serializedChars: Number(row.serialized_chars) || 0,
+      stringValues: Object.fromEntries(
+        (request.collectStringFields ?? []).map((field, index) => [
+          field,
+          Array.isArray(row[`strings_${index}`]) ? row[`strings_${index}`] : [],
+        ]),
+      ),
+    };
   }
 
   async close(): Promise<void> {

@@ -1,3 +1,25 @@
+export type StateKVJsonPrimitive = string | number | boolean | null;
+
+export type StateKVJsonFilter =
+  | { field: string; operator: "exists" }
+  | {
+      field: string;
+      operator: "equals" | "not_equals" | "equals_or_missing";
+      value: StateKVJsonPrimitive;
+    };
+
+export interface StateKVJsonAggregateRequest {
+  scopes: string[];
+  filters?: StateKVJsonFilter[];
+  collectStringFields?: string[];
+}
+
+export interface StateKVJsonAggregateResult {
+  count: number;
+  serializedChars: number;
+  stringValues: Record<string, string[]>;
+}
+
 export interface StateKVBackend {
   readonly name: string;
   handles(scope: string): boolean;
@@ -10,6 +32,9 @@ export interface StateKVBackend {
   ): Promise<T>;
   delete(scope: string, key: string): Promise<void>;
   list<T = unknown>(scope: string): Promise<T[]>;
+  aggregateJson?(
+    request: StateKVJsonAggregateRequest,
+  ): Promise<StateKVJsonAggregateResult>;
 }
 
 export function applyJsonUpdate<T>(

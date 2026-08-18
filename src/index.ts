@@ -1,5 +1,6 @@
-import { registerWorker } from "iii-sdk";
+import { registerWorker, TriggerAction } from "iii-sdk";
 import {
+  hydrateProcessEnvFromFile,
   loadConfig,
   getEnvVar,
   loadEmbeddingConfig,
@@ -13,6 +14,8 @@ import {
   isContextInjectionEnabled,
   isDropStaleIndexEnabled,
   isOtelEnabled,
+  getSessionIdleTimeoutMs,
+  getSessionIdleSweepIntervalMs,
   getSearchIndexMaxItems,
   getVectorIndexMaxItems,
   getVectorBackend,
@@ -60,6 +63,7 @@ import {
   setVectorStore,
   setEmbeddingProvider,
   setIndexPersistence,
+  setHybridRanker,
 } from "./functions/search.js";
 import { registerContextFunction } from "./functions/context.js";
 import { registerSummarizeFunction } from "./functions/summarize.js";
@@ -69,6 +73,7 @@ import { registerConsolidateFunction } from "./functions/consolidate.js";
 import { registerPatternsFunction } from "./functions/patterns.js";
 import { registerRememberFunction } from "./functions/remember.js";
 import { registerEvictFunction } from "./functions/evict.js";
+import { registerFinalizeIdleSessionsFunction } from "./functions/finalize-idle-sessions.js";
 import { registerRelationsFunction } from "./functions/relations.js";
 import { registerTimelineFunction } from "./functions/timeline.js";
 import { registerSmartSearchFunction } from "./functions/smart-search.js";
@@ -79,6 +84,7 @@ import { registerExportImportFunction } from "./functions/export-import.js";
 import { registerEnrichFunction } from "./functions/enrich.js";
 import { registerClaudeBridgeFunction } from "./functions/claude-bridge.js";
 import { registerGraphFunction } from "./functions/graph.js";
+import { registerGraphImportFunction } from "./functions/graph-import.js";
 import { registerConsolidationPipelineFunction } from "./functions/consolidation-pipeline.js";
 import { registerTeamFunction } from "./functions/team.js";
 import { registerGovernanceFunction } from "./functions/governance.js";
@@ -110,6 +116,7 @@ import { registerTemporalGraphFunctions } from "./functions/temporal-graph.js";
 import { registerRetentionFunctions } from "./functions/retention.js";
 import { registerCompressFileFunction } from "./functions/compress-file.js";
 import { registerReplayFunctions } from "./functions/replay.js";
+import { registerContextReductionFunctions } from "./functions/context-reduction.js";
 import { registerApiTriggers } from "./triggers/api.js";
 import { registerEventTriggers } from "./triggers/events.js";
 import { registerMcpEndpoints } from "./mcp/server.js";
@@ -181,6 +188,10 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function main() {
+  // Fold ~/.agentmemory/.env into process.env before anything reads config
+  // or raw process.env. Only-if-unset, so real process.env still wins.
+  hydrateProcessEnvFromFile();
+
   const config = loadConfig();
   const embeddingConfig = loadEmbeddingConfig();
   const fallbackConfig = loadFallbackConfig();
@@ -347,6 +358,7 @@ async function main() {
   registerDiskSizeManager(sdk, kv);
   registerCompressFunction(sdk, kv, provider, metricsStore);
   registerSearchFunction(sdk, kv);
+  registerContextReductionFunctions(sdk, kv);
   registerContextFunction(sdk, kv, config.tokenBudget);
   registerSummarizeFunction(sdk, kv, provider, metricsStore);
   registerMigrateFunction(sdk, kv);
@@ -355,6 +367,7 @@ async function main() {
   registerPatternsFunction(sdk, kv);
   registerRememberFunction(sdk, kv);
   registerEvictFunction(sdk, kv);
+  registerFinalizeIdleSessionsFunction(sdk, kv);
 
   registerRelationsFunction(sdk, kv);
   registerTimelineFunction(sdk, kv);
@@ -371,31 +384,32 @@ async function main() {
     );
   }
 
-  if (isGraphExtractionEnabled()) {
-    registerGraphFunction(sdk, kv, provider);
-    bootLog(`Knowledge graph: extraction enabled`);
-  }
+  registerGraphFunction(sdk, kv, provider);
+  registerGraphImportFunction(sdk, kv);
+  bootLog(
+    `Knowledge graph: structural extraction on (LLM relations ${isGraphExtractionEnabled() ? "enabled" : "off"})`,
+  );
 
   registerConsolidationPipelineFunction(sdk, kv, provider);
   bootLog(`Consolidation pipeline: registered (CONSOLIDATION_ENABLED=${isConsolidationEnabled() ? "true" : "false"})`);
 
   if (isAutoCompressEnabled()) {
     bootLog(
-      `WARNING: AGENTMEMORY_AUTO_COMPRESS=true — every PostToolUse observation will be sent to your LLM provider for compression. This spends API tokens proportional to your session tool-use frequency (see #138). Set AGENTMEMORY_AUTO_COMPRESS=false to disable.`,
+      `WARNING: AGENTMEMORY_AUTO_COMPRESS=true — every PostToolUse observation will be sent to your LLM provider for compression. This spends API tokens proportional to your session tool-use frequency. Set AGENTMEMORY_AUTO_COMPRESS=false to disable.`,
     );
   } else {
     bootLog(
-      `Auto-compress: OFF (default, #138) — observations indexed via zero-LLM synthetic compression. Set AGENTMEMORY_AUTO_COMPRESS=true to opt-in to LLM-powered summaries (uses your API key).`,
+      `Auto-compress: OFF (default) — observations indexed via zero-LLM synthetic compression. Set AGENTMEMORY_AUTO_COMPRESS=true to opt-in to LLM-powered summaries (uses your API key).`,
     );
   }
 
   if (isContextInjectionEnabled()) {
     bootLog(
-      `WARNING: AGENTMEMORY_INJECT_CONTEXT=true — the PreToolUse and SessionStart hooks will inject up to ~4000 chars of memory context into every tool turn. On Claude Pro this burns session tokens proportional to your tool-call frequency (see #143). Set AGENTMEMORY_INJECT_CONTEXT=false to disable.`,
+      `WARNING: AGENTMEMORY_INJECT_CONTEXT=true — SessionStart, PreCompact, and matching PreToolUse hooks can add recalled memory to the model context. Usage grows with started sessions, compactions, and matching tool calls (see #143). Set AGENTMEMORY_INJECT_CONTEXT=false to disable automatic injection.`,
     );
   } else {
     bootLog(
-      `Context injection: OFF (default, #143) — hooks capture observations but do not inject context into Claude Code's conversation. Set AGENTMEMORY_INJECT_CONTEXT=true to opt-in (warning: expect your Claude Pro allocation to drain faster).`,
+      `Context injection: OFF (default, #143) — supported host hooks still capture observations and MCP recall remains available, but no recalled memory is added automatically. Set AGENTMEMORY_INJECT_CONTEXT=true to opt in.`,
     );
   }
 
@@ -452,6 +466,21 @@ async function main() {
   const snapshotConfig = loadSnapshotConfig();
   if (snapshotConfig.enabled) {
     registerSnapshotFunction(sdk, kv, snapshotConfig.dir);
+    // The boot line promised "every <interval>s" but nothing ever fired
+    // mem::snapshot-create. Drive it on a periodic timer (unref'd so it
+    // never keeps the process alive), mirroring the auto-forget timer.
+    // mem::snapshot-create serializes overlapping runs internally (git-lock
+    // safety), so the timer can stay a simple fire-and-forget tick.
+    const snapshotTimer = setInterval(() => {
+      sdk
+        .trigger({
+          function_id: "mem::snapshot-create",
+          payload: {},
+          action: TriggerAction.Void(),
+        })
+        .catch(() => {});
+    }, snapshotConfig.interval * 1000);
+    snapshotTimer.unref();
     bootLog(
       `Git snapshots: ${snapshotConfig.dir} (every ${snapshotConfig.interval}s)`,
     );
@@ -469,9 +498,10 @@ async function main() {
     graphWeight,
   );
 
-  registerSmartSearchFunction(sdk, kv, (query, limit) =>
-    hybridSearch.search(query, limit),
-  );
+  const hybridRanker = (query: string, limit: number) =>
+    hybridSearch.search(query, limit);
+  registerSmartSearchFunction(sdk, kv, hybridRanker);
+  setHybridRanker(hybridRanker);
   registerRecentSearchesSweepFunction(sdk, kv);
 
   registerApiTriggers(sdk, kv, secret, metricsStore, provider);
@@ -615,7 +645,7 @@ async function main() {
       }
       if (backfilled > 0) {
         bootLog(
-          `Backfilled ${backfilled} memories into BM25 (legacy gap before #257)`,
+          `Backfilled ${backfilled} memories into BM25 (legacy index gap)`,
         );
         indexPersistence.scheduleSave();
       }
@@ -635,7 +665,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 128 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 133 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
@@ -652,6 +682,30 @@ async function main() {
 
   const autoForgetIntervalMs = parseInt(process.env.AUTO_FORGET_INTERVAL_MS || "3600000", 10);
   const consolidationIntervalMs = parseInt(process.env.CONSOLIDATION_INTERVAL_MS || "7200000", 10);
+  const sessionIdleTimeoutMs = getSessionIdleTimeoutMs();
+  const sessionIdleSweepIntervalMs = getSessionIdleSweepIntervalMs();
+
+  if (sessionIdleTimeoutMs > 0) {
+    const runIdleSessionSweep = async () => {
+      try {
+        await sdk.trigger({
+          function_id: "mem::finalize-idle-sessions",
+          payload: { idleTimeoutMs: sessionIdleTimeoutMs },
+        });
+      } catch {}
+    };
+    await runIdleSessionSweep();
+    const sessionIdleSweepTimer = setInterval(
+      runIdleSessionSweep,
+      sessionIdleSweepIntervalMs,
+    );
+    sessionIdleSweepTimer.unref();
+    bootLog(
+      `Idle-session finalizer: enabled after ${sessionIdleTimeoutMs / 3600000}h idle (every ${sessionIdleSweepIntervalMs / 60000}m)`,
+    );
+  } else {
+    bootLog(`Idle-session finalizer: disabled`);
+  }
 
   if (process.env.AUTO_FORGET_ENABLED !== "false") {
     const autoForgetTimer = setInterval(async () => {
