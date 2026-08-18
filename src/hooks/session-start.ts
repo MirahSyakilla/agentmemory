@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProject, hookCwd } from "./_project.js";
+import { loadHookEnv } from "./_env.js";
+import { recordContextReduction } from "./_context-reduction.js";
+import type { ContextReductionAccounting } from "../types.js";
+
+loadHookEnv();
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
 // .mjs (matches the pattern used by every other hook entry in tsdown.config).
@@ -13,9 +18,9 @@ function isSdkChildContext(payload: unknown): boolean {
 //
 // Always registers the session for observation tracking (so memories
 // captured on PostToolUse get attached to the right session). Only writes
-// project context to stdout — which Claude Code prepends to the very first
-// turn — when AGENTMEMORY_INJECT_CONTEXT=true. Default off as of 0.8.10
-// (#143); see pre-tool-use.ts for the full explanation.
+// project context to stdout for a supporting host to add to the new thread
+// when AGENTMEMORY_INJECT_CONTEXT=true. Default off as of 0.8.10 (#143);
+// see pre-tool-use.ts for the full explanation.
 const INJECT_CONTEXT = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "true";
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
@@ -34,6 +39,24 @@ function authHeaders(): Record<string, string> {
   return h;
 }
 
+function contextPayload(data: Record<string, unknown>, context: string): string {
+  if (
+    typeof data.cursor_version === "string" ||
+    data.hook_event_name === "sessionStart"
+  ) {
+    return JSON.stringify({ additional_context: context });
+  }
+  if (process.env["DEVIN_PROJECT_DIR"] || data.prompt_id !== undefined) {
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: context,
+      },
+    });
+  }
+  return context;
+}
+
 async function main() {
   let input = "";
   for await (const chunk of process.stdin) {
@@ -47,13 +70,14 @@ async function main() {
     return;
   }
 
+  if (!data || typeof data !== "object") return;
   if (isSdkChildContext(data)) return;
 
   const sessionId =
-    ((data.session_id || data.sessionId) as string) ||
+    ((data.session_id || data.sessionId || data.conversation_id) as string) ||
     `ses_${Date.now().toString(36)}`;
-  const cwd = (data.cwd as string) || process.cwd();
-  const project = resolveProject(data.cwd as string | undefined);
+  const cwd = hookCwd(data) || process.cwd();
+  const project = resolveProject(cwd);
 
   const url = `${REST_URL}/agentmemory/session/start`;
   const init: RequestInit = {
@@ -70,6 +94,7 @@ async function main() {
       ...init,
       signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
     }).catch(() => {});
+    setTimeout(() => process.exit(0), 500).unref();
     return;
   }
 
@@ -79,14 +104,25 @@ async function main() {
       signal: AbortSignal.timeout(INJECT_TIMEOUT_MS),
     });
     if (res.ok) {
-      const result = (await res.json()) as { context?: string };
+      const result = (await res.json()) as {
+        context?: string;
+        accounting?: ContextReductionAccounting;
+      };
       if (result.context) {
-        process.stdout.write(result.context);
+        process.stdout.write(contextPayload(data, result.context));
       }
+      await recordContextReduction({
+        restUrl: REST_URL,
+        secret: SECRET,
+        accounting: result.accounting,
+        source: "session_start",
+        sessionId,
+        project,
+      });
     }
   } catch {
-    // silently fail -- don't block Claude Code startup
+    // silently fail -- don't block host startup
   }
 }
 
-main();
+main().catch(() => process.exit(0));

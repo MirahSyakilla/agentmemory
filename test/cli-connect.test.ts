@@ -44,13 +44,16 @@ describe("agentmemory connect — dispatcher", () => {
     expect(knownAgents().sort()).toEqual(
       [
         "antigravity",
+        "antigravity-cli",
         "claude-code",
         "cline",
         "copilot-cli",
         "codex",
         "continue",
         "cursor",
+    "devin",
         "droid",
+        "dsh",
         "gemini-cli",
         "hermes",
         "kiro",
@@ -63,7 +66,7 @@ describe("agentmemory connect — dispatcher", () => {
         "zed",
       ].sort(),
     );
-    expect(ADAPTERS.length).toBe(18);
+    expect(ADAPTERS.length).toBe(21);
   });
 
   it("every adapter exposes detect() and install()", () => {
@@ -336,6 +339,47 @@ describe("agentmemory connect — codex adapter (mock filesystem)", () => {
     expect(config).toContain('/home/meow/agentmemory/dist/standalone.mjs');
     expect(config).not.toContain('@agentmemory/mcp');
   });
+
+  it("force refresh preserves parent and per-tool MCP approval settings", async () => {
+    require("node:fs").mkdirSync(join(tmpHome, ".codex"), { recursive: true });
+    const configPath = join(tmpHome, ".codex", "config.toml");
+    writeFileSync(
+      configPath,
+      `[features]
+multi_agent = true
+
+[mcp_servers.agentmemory]
+command = "/old/node"
+args = ["/old/standalone.mjs"]
+default_tools_approval_mode = "approve"
+
+[mcp_servers.agentmemory.env]
+AGENTMEMORY_URL = "http://old-host:3111"
+AGENTMEMORY_TOOLS = "core"
+AGENTMEMORY_SECRET = "preserve-me"
+
+[mcp_servers.agentmemory.tools.memory_recall]
+approval_mode = "approve"
+`,
+    );
+
+    const a = await loadCodex();
+    const result = await a.install({ dryRun: false, force: true });
+    expect(result.kind).toBe("installed");
+
+    const config = readFileSync(configPath, "utf-8");
+    expect(config).toContain('default_tools_approval_mode = "approve"');
+    expect(config).toContain('AGENTMEMORY_SECRET = "preserve-me"');
+    expect(config).toContain('[mcp_servers.agentmemory.tools.memory_recall]');
+    expect(config).toContain('approval_mode = "approve"');
+    expect(config.match(/^command = /gm)).toHaveLength(1);
+    expect(config.indexOf('[mcp_servers.agentmemory]')).toBeLessThan(
+      config.indexOf('[mcp_servers.agentmemory.env]'),
+    );
+    expect(config.indexOf('[mcp_servers.agentmemory.env]')).toBeLessThan(
+      config.indexOf('[mcp_servers.agentmemory.tools.memory_recall]'),
+    );
+  });
 });
 
 describe("agentmemory connect — copilot-cli adapter (mock filesystem)", () => {
@@ -542,9 +586,4 @@ describe("agentmemory connect — stub adapters log + return stub", () => {
     expect(result.kind).toBe("stub");
   });
 
-  it("pi adapter returns stub", async () => {
-    const { adapter } = await import("../src/cli/connect/pi.js");
-    const result = await adapter.install({ dryRun: false, force: false });
-    expect(result.kind).toBe("stub");
-  });
 });

@@ -22,50 +22,125 @@ const CODEX_TOML = join(CODEX_DIR, "config.toml");
 const CODEX_HOOKS = join(CODEX_DIR, "hooks.json");
 
 const SECTION_HEADER = "[mcp_servers.agentmemory]";
+const ENV_SECTION_HEADER = "[mcp_servers.agentmemory.env]";
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
-}
-
-function buildTomlBlock(): string {
-  const standalonePath = resolve(join(findPluginRoot(), "..", "dist", "standalone.mjs"));
-  return `[mcp_servers.agentmemory]
-command = "node"
-args = [${tomlString(standalonePath)}]
-
-[mcp_servers.agentmemory.env]
-AGENTMEMORY_URL = "http://localhost:3111"
-AGENTMEMORY_TOOLS = "all"
-`;
 }
 
 function isWiredText(toml: string): boolean {
   return toml.includes(SECTION_HEADER);
 }
 
-function stripExistingBlock(toml: string): string {
-  const lines = toml.split(/\r?\n/);
-  const out: string[] = [];
-  let skipping = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (
-      trimmed === SECTION_HEADER ||
-      trimmed === "[mcp_servers.agentmemory.env]"
-    ) {
-      skipping = true;
-      continue;
-    }
-    if (
-      skipping &&
-      trimmed.startsWith("[") &&
-      trimmed !== "[mcp_servers.agentmemory.env]"
-    ) {
-      skipping = false;
-    }
-    if (!skipping) out.push(line);
+function sectionBounds(
+  lines: string[],
+  header: string,
+): { start: number; end: number } | null {
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start === -1) return null;
+  let end = start + 1;
+  while (end < lines.length && !lines[end].trim().startsWith("[")) end += 1;
+  return { start, end };
+}
+
+function replaceManagedSectionLines(
+  lines: string[],
+  header: string,
+  managedKeys: string[],
+  managedLines: string[],
+): string[] {
+  const bounds = sectionBounds(lines, header);
+  if (!bounds) return lines;
+  const preserved = lines
+    .slice(bounds.start + 1, bounds.end)
+    .filter((line) => {
+      const trimmed = line.trim();
+      return !managedKeys.some((key) =>
+        new RegExp(`^${key}\\s*=`).test(trimmed),
+      );
+    });
+  while (preserved[0]?.trim() === "") preserved.shift();
+  const replacement = [header, ...managedLines];
+  if (preserved.length > 0) replacement.push(...preserved);
+  replacement.push("");
+  return [
+    ...lines.slice(0, bounds.start),
+    ...replacement,
+    ...lines.slice(bounds.end),
+  ];
+}
+
+function insertSection(
+  lines: string[],
+  index: number,
+  header: string,
+  managedLines: string[],
+): string[] {
+  const prefix = lines.slice(0, index);
+  while (prefix.at(-1)?.trim() === "") prefix.pop();
+  if (prefix.length > 0) prefix.push("");
+  return [
+    ...prefix,
+    header,
+    ...managedLines,
+    "",
+    ...lines.slice(index),
+  ];
+}
+
+export function mergeCodexMcpToml(
+  toml: string,
+  standalonePath = resolve(
+    join(findPluginRoot(), "..", "dist", "standalone.mjs"),
+  ),
+): string {
+  const baseLines = [
+    'command = "node"',
+    `args = [${tomlString(standalonePath)}]`,
+  ];
+  const envLines = [
+    'AGENTMEMORY_URL = "http://localhost:3111"',
+    'AGENTMEMORY_TOOLS = "all"',
+  ];
+  let lines = toml.split(/\r?\n/);
+
+  if (sectionBounds(lines, SECTION_HEADER)) {
+    lines = replaceManagedSectionLines(
+      lines,
+      SECTION_HEADER,
+      ["command", "args"],
+      baseLines,
+    );
+  } else {
+    const childIndex = lines.findIndex((line) =>
+      line.trim().startsWith("[mcp_servers.agentmemory."),
+    );
+    lines = insertSection(
+      lines,
+      childIndex === -1 ? lines.length : childIndex,
+      SECTION_HEADER,
+      baseLines,
+    );
   }
-  return out.join("\n").replace(/\n{3,}$/, "\n\n").trimEnd() + "\n";
+
+  if (sectionBounds(lines, ENV_SECTION_HEADER)) {
+    lines = replaceManagedSectionLines(
+      lines,
+      ENV_SECTION_HEADER,
+      ["AGENTMEMORY_URL", "AGENTMEMORY_TOOLS"],
+      envLines,
+    );
+  } else {
+    const baseBounds = sectionBounds(lines, SECTION_HEADER);
+    lines = insertSection(
+      lines,
+      baseBounds?.end ?? lines.length,
+      ENV_SECTION_HEADER,
+      envLines,
+    );
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 export const adapter: ConnectAdapter = {
@@ -106,9 +181,7 @@ export const adapter: ConnectAdapter = {
       mkdirSync(dirname(CODEX_TOML), { recursive: true });
     }
 
-    const cleaned = wired ? stripExistingBlock(current) : current;
-    const joiner = cleaned.length === 0 || cleaned.endsWith("\n") ? "" : "\n";
-    const next = `${cleaned}${joiner}${cleaned.length > 0 ? "\n" : ""}${buildTomlBlock()}`;
+    const next = mergeCodexMcpToml(current);
     writeFileSync(CODEX_TOML, next, "utf-8");
 
     const verify = readFileSync(CODEX_TOML, "utf-8");
@@ -177,8 +250,11 @@ function installCodexHooks(opts: ConnectOptions): ConnectResult {
   writeJsonAtomic(CODEX_HOOKS, merged);
 
   logInstalled("Codex hooks (workaround for openai/codex#16430)", CODEX_HOOKS);
+  p.log.warn(
+    "Codex runs only trusted hooks: launch `codex` (the TUI) once and choose \"Trust all and continue\" at the \"Hooks need review\" prompt. `codex exec` never shows the prompt, so hooks stay inert until then.",
+  );
   p.log.info(
-    "User-scope hooks reference absolute paths under the bundled plugin/ dir. Re-run `agentmemory connect codex --with-hooks` after upgrading agentmemory to refresh them.",
+    "User-scope hooks reference absolute paths under the bundled plugin/ dir. Re-run `agentmemory connect codex --with-hooks` after upgrading agentmemory to refresh them, then re-approve in the TUI.",
   );
 
   return {

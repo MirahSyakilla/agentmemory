@@ -92,12 +92,14 @@ describe("Codex plugin manifest (developers.openai.com/codex/plugins)", () => {
     );
   });
 
-  it("hooks.codex.json contains only events Codex supports (no Subagent / SessionEnd / Notification / TaskCompleted / PostToolUseFailure)", () => {
+  it("hooks.codex.json contains only events Codex supports", () => {
     const hooksPath = join(pluginRoot, "hooks/hooks.codex.json");
     const hooks = readJson<{ hooks: Record<string, unknown> }>(hooksPath);
     const events = Object.keys(hooks.hooks);
     const codexSupported = new Set([
       "SessionStart",
+      "SubagentStart",
+      "SubagentStop",
       "UserPromptSubmit",
       "PreToolUse",
       "PostToolUse",
@@ -110,6 +112,8 @@ describe("Codex plugin manifest (developers.openai.com/codex/plugins)", () => {
       expect(codexSupported.has(event), `unexpected event "${event}" in hooks.codex.json`).toBe(true);
     }
     expect(events).toContain("SessionStart");
+    expect(events).toContain("SubagentStart");
+    expect(events).toContain("SubagentStop");
     expect(events).toContain("UserPromptSubmit");
     expect(events).toContain("PreToolUse");
     expect(events).toContain("PostToolUse");

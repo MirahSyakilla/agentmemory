@@ -35,13 +35,17 @@ describe("buildMergedHooks", () => {
     const preToolUse = merged.hooks["PreToolUse"];
     expect(preToolUse).toBeDefined();
     expect(preToolUse!.length).toBeGreaterThan(0);
-    expect(preToolUse![0].matcher).toBe("Edit|Write|Read|Glob|Grep");
+    expect(preToolUse![0].matcher).toBe(
+      "apply_patch|Edit|Write|Read|Glob|Grep|view_image",
+    );
   });
 
-  it("includes all six expected lifecycle events", () => {
+  it("includes all eight expected lifecycle events", () => {
     const merged = buildMergedHooks(null, PLUGIN_ROOT);
     for (const event of [
       "SessionStart",
+      "SubagentStart",
+      "SubagentStop",
       "UserPromptSubmit",
       "PreToolUse",
       "PostToolUse",

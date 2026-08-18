@@ -1,7 +1,12 @@
 import type { Plugin } from "@opencode-ai/plugin";
+import { execFileSync } from "node:child_process";
+import { basename } from "node:path";
 
 const API = process.env.AGENTMEMORY_URL || "http://localhost:3111";
-const FILE_TOOLS = new Set(["Read", "Write", "Edit", "Glob", "Grep"]);
+// OpenCode reports tool names in lowercase ("read", "edit", ...); matching is
+// case-insensitive at the call site so a future casing change cannot silently
+// kill file enrichment again.
+const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep"]);
 const FILE_KEYS = ["filePath", "file_path", "path", "file", "pattern"];
 const MAX_STASHED_FILES = 20;
 
@@ -42,16 +47,41 @@ async function postJson(path: string, body: Record<string, unknown>): Promise<un
   }
 }
 
+async function getJson(path: string): Promise<unknown | null> {
+  try {
+    const res = await fetch(`${API}/agentmemory${path}`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok ? await res.json() : null;
+  } catch (e) {
+    if (DEBUG) console.error(`[agentmemory] GET ${path} failed:`, (e as Error).message);
+    return null;
+  }
+}
+
+async function contextInjectionEnabled(): Promise<boolean> {
+  const result = await getJson("/config/flags");
+  const flags = (result as { flags?: unknown } | null)?.flags;
+  if (!Array.isArray(flags)) return false;
+  const flag = flags.find(
+    (item): item is { key: string; enabled?: boolean } =>
+      typeof item === "object" && item !== null && (item as { key?: unknown }).key === "AGENTMEMORY_INJECT_CONTEXT",
+  );
+  return flag?.enabled === true;
+}
+
 async function observe(
   sessionId: string,
   hookType: string,
   data: Record<string, unknown>,
 ): Promise<void> {
+  const proj = projectFor(sessionId);
   await post("/observe", {
     hookType,
     sessionId,
-    project: projectPath,
-    cwd: projectPath,
+    project: proj.name,
+    cwd: proj.cwd,
     timestamp: new Date().toISOString(),
     data,
   });
@@ -59,7 +89,46 @@ async function observe(
 
 let activeSessionId: string | null = null;
 let pendingConfig: Record<string, unknown> | null = null;
-let projectPath: string | null = null;
+// Default scope resolved at plugin init (same resolution order as the hooks'
+// resolveProject: env override, git toplevel basename, cwd basename). In a
+// long-lived OpenCode process serving multiple directories these defaults are
+// only a fallback — attribution is per-session via sessionProjects, resolved
+// from each session's own directory at session.created. Module-level-only
+// state recorded home-directory sessions under whatever repo loaded first.
+let defaultProjectName: string | null = null;
+let defaultProjectCwd: string | null = null;
+const sessionProjects = new Map<string, { name: string; cwd: string }>();
+
+function projectFor(sessionId: string): { name: string | null; cwd: string | null } {
+  const p = sessionProjects.get(sessionId);
+  return p ?? { name: defaultProjectName, cwd: defaultProjectCwd };
+}
+
+const projectNameCache = new Map<string, string>();
+
+function resolveProjectName(dir: string): string {
+  const explicit = process.env.AGENTMEMORY_PROJECT_NAME?.trim();
+  if (explicit) return explicit;
+  const cached = projectNameCache.get(dir);
+  if (cached !== undefined) return cached;
+  try {
+    const top = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    }).trim();
+    if (top) {
+      const name = basename(top);
+      projectNameCache.set(dir, name);
+      return name;
+    }
+  } catch {
+    // not a git repo, fall through
+  }
+  const fallback = basename(dir) || dir;
+  projectNameCache.set(dir, fallback);
+  return fallback;
+}
 const stashedFiles = new Map<string, Set<string>>();
 const seenSubtaskIds = new Map<string, Set<string>>();
 const seenToolCallIds = new Map<string, Set<string>>();
@@ -93,6 +162,7 @@ function pruneSessionMaps(sid: string): void {
   stashedFiles.delete(sid);
   seenSubtaskIds.delete(sid);
   seenToolCallIds.delete(sid);
+  sessionProjects.delete(sid);
 }
 
 function safeSlice(v: unknown, max: number): string {
@@ -168,7 +238,9 @@ function extractErrorMessage(err: unknown): string {
 }
 
 export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
-  projectPath = ctx.worktree || ctx.project?.id || process.cwd();
+  defaultProjectCwd = ctx.worktree || ctx.project?.id || process.cwd();
+  defaultProjectName = resolveProjectName(defaultProjectCwd);
+  const injectContext = await contextInjectionEnabled();
 
   return {
     event: async ({ event }) => {
@@ -188,13 +260,28 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         // and another `session.created` event during the await could
         // rebind it, causing context to be cached against the wrong key.
         const sessionId = activeSessionId;
+        // Attribute this session to its own directory when the event
+        // carries one; a multi-directory OpenCode process otherwise
+        // records every session under whichever repo loaded the plugin.
+        const sessionDir =
+          typeof info?.directory === "string" && info.directory
+            ? info.directory
+            : defaultProjectCwd;
+        let proj: { name: string | null; cwd: string | null };
+        if (sessionDir) {
+          const entry = { cwd: sessionDir, name: resolveProjectName(sessionDir) };
+          sessionProjects.set(sessionId, entry);
+          proj = entry;
+        } else {
+          proj = projectFor(sessionId);
+        }
         const startResult = await postJson("/session/start", {
           sessionId,
           title: info?.title ?? null,
           parentID: info?.parentID ?? null,
           version: info?.version ?? null,
-          project: projectPath,
-          cwd: projectPath,
+          project: proj.name,
+          cwd: proj.cwd,
         });
         // cache the context returned at session/start so the
         // chat.system.transform hook injects it without a second fetch.
@@ -269,13 +356,9 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
           return;
         }
         await post("/session/end", { sessionId: sid });
-        post("/crystals/auto", { olderThanDays: 7 }, 30000);
-        post("/consolidate-pipeline", { tier: "all", force: true }, 30000);
         if (sid === activeSessionId) activeSessionId = null;
-        stashedFiles.delete(sid);
+        pruneSessionMaps(sid);
         startContextCache.delete(sid);
-        seenSubtaskIds.delete(sid);
-        seenToolCallIds.delete(sid);
         contextInjectedSessions.delete(sid);
       }
 
@@ -581,7 +664,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
 
     // ── tool.execute.before ──
     "tool.execute.before": async (input, output) => {
-      if (!FILE_TOOLS.has(input.tool)) return;
+      if (!FILE_TOOLS.has(String(input.tool ?? "").toLowerCase())) return;
       const sid = input.sessionID || activeSessionId;
       if (!sid) return;
       const args = output.args as Record<string, unknown> | undefined;
@@ -599,6 +682,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
 
     // ── experimental.chat.system.transform ──
     "experimental.chat.system.transform": async (input, output) => {
+      if (!injectContext) return;
       const sid = input.sessionID || activeSessionId;
       if (!sid) return;
 
@@ -612,7 +696,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         if (typeof ctx !== "string" || ctx.length === 0) {
           const result = await postJson("/context", {
             sessionId: sid,
-            project: projectPath,
+            project: projectFor(sid).name,
           });
           ctx = (result as any)?.context;
         } else {
@@ -645,12 +729,13 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
 
     // ── experimental.session.compacting (WIP) ──
     "experimental.session.compacting": async (input, output) => {
+      if (!injectContext) return;
       const sid = input.sessionID || activeSessionId;
       if (!sid) return;
 
       const result = await postJson("/context", {
         sessionId: sid,
-        project: projectPath,
+        project: projectFor(sid).name,
       });
       const ctx = (result as any)?.context;
       if (typeof ctx === "string" && ctx.length > 0) {

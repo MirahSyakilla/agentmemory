@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+import { resolveProject } from "./_project.js";
+import { loadHookEnv } from "./_env.js";
+import { recordContextReduction } from "./_context-reduction.js";
+import type { ContextReductionAccounting } from "../types.js";
+
+loadHookEnv();
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -10,15 +16,13 @@ function isSdkChildContext(payload: unknown): boolean {
 //
 // THIS HOOK IS A NO-OP BY DEFAULT AS OF 0.8.10 (#143). Previously it
 // fired /agentmemory/enrich on every Edit/Write/Read/Glob/Grep tool call
-// and wrote up to 4000 chars of context to stdout. Claude Code reads
-// PreToolUse stdout and prepends it to the model's next turn, which meant
-// agentmemory was silently injecting ~1000 tokens into every tool turn
-// via the user's Claude Code session. On Claude Pro that burned entire
-// allocations in a handful of messages (@adrianricardo, #143).
+// and wrote up to 4000 chars of context to stdout. Supporting hosts add
+// that output to model context, which meant agentmemory could silently add
+// roughly 1000 estimated tokens to every matching tool turn (#143).
 //
 // Users who explicitly want pre-tool enrichment opt in with:
 //   AGENTMEMORY_INJECT_CONTEXT=true   in ~/.agentmemory/.env
-// and restart Claude Code. Expect your session input token count to grow
+// and restart the host. Expect session input context to grow
 // proportionally with the number of file-touching tool calls per turn.
 const INJECT_CONTEXT = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "true";
 
@@ -48,6 +52,7 @@ async function main() {
     return;
   }
 
+  if (!data || typeof data !== "object") return;
   if (isSdkChildContext(data)) return;
 
   const toolName =
@@ -59,7 +64,17 @@ async function main() {
   if (!toolName) return;
 
   const normalizedToolName = toolName.toLowerCase();
-  const fileTools = ["edit", "write", "create", "read", "view", "glob", "grep"];
+  const fileTools = [
+    "edit",
+    "write",
+    "create",
+    "read",
+    "view",
+    "glob",
+    "grep",
+    "apply_patch",
+    "view_image",
+  ];
   if (!fileTools.includes(normalizedToolName)) return;
 
   const rawToolInput = data.tool_input ?? data.toolArgs;
@@ -78,7 +93,29 @@ async function main() {
     const val = toolInput[key];
     if (typeof val === "string" && val.length > 0) files.push(val);
   }
-  if (files.length === 0) return;
+  if (normalizedToolName === "view_image") {
+    const imagePath = toolInput["path"];
+    if (typeof imagePath === "string" && imagePath.length > 0) {
+      files.push(imagePath);
+    }
+  }
+  if (normalizedToolName === "apply_patch") {
+    const patchText =
+      typeof rawToolInput === "string"
+        ? rawToolInput
+        : typeof toolInput["patch"] === "string"
+          ? toolInput["patch"]
+          : typeof toolInput["input"] === "string"
+            ? toolInput["input"]
+            : "";
+    for (const match of patchText.matchAll(
+      /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm,
+    )) {
+      if (match[1]) files.push(match[1].trim());
+    }
+  }
+  const uniqueFiles = [...new Set(files)];
+  if (uniqueFiles.length === 0) return;
 
   const terms: string[] = [];
   if (normalizedToolName === "grep" || normalizedToolName === "glob") {
@@ -88,7 +125,7 @@ async function main() {
     }
   }
 
-  const rawSessionId = data.session_id || data.sessionId;
+  const rawSessionId = data.session_id || data.sessionId || data.conversation_id;
   const sessionId =
     typeof rawSessionId === "string" && rawSessionId.length > 0
       ? rawSessionId
@@ -96,7 +133,7 @@ async function main() {
   const project =
     typeof data.project === "string" && data.project.trim().length > 0
       ? data.project.trim()
-      : undefined;
+      : resolveProject(data.cwd as string | undefined);
 
   try {
     const res = await fetch(`${REST_URL}/agentmemory/enrich`, {
@@ -104,7 +141,7 @@ async function main() {
       headers: authHeaders(),
       body: JSON.stringify({
         sessionId,
-        files,
+        files: uniqueFiles,
         terms,
         toolName,
         ...(project !== undefined && { project }),
@@ -113,9 +150,20 @@ async function main() {
     });
 
     if (res.ok) {
-      const result = (await res.json()) as { context?: string };
+      const result = (await res.json()) as {
+        context?: string;
+        accounting?: ContextReductionAccounting;
+      };
       if (result.context) {
         process.stdout.write(result.context);
+        await recordContextReduction({
+          restUrl: REST_URL,
+          secret: SECRET,
+          accounting: result.accounting,
+          source: "pre_tool_use",
+          sessionId,
+          project,
+        });
       }
     }
   } catch {
@@ -123,4 +171,4 @@ async function main() {
   }
 }
 
-main();
+main().catch(() => process.exit(0));

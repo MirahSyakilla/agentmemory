@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProject, hookCwd } from "./_project.js";
+import { loadHookEnv } from "./_env.js";
+import { recordContextReduction } from "./_context-reduction.js";
+import type { ContextReductionAccounting } from "../types.js";
+
+loadHookEnv();
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -9,6 +14,7 @@ function isSdkChildContext(payload: unknown): boolean {
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
+const INJECT_CONTEXT = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "true";
 
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -29,10 +35,11 @@ async function main() {
     return;
   }
 
+  if (!data || typeof data !== "object") return;
   if (isSdkChildContext(data)) return;
 
-  const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
-  const project = resolveProject(data.cwd as string | undefined);
+  const sessionId = ((data.session_id || data.sessionId || data.conversation_id) as string) || "unknown";
+  const project = resolveProject(hookCwd(data));
 
   if (process.env["CLAUDE_MEMORY_BRIDGE"] === "true") {
     try {
@@ -47,6 +54,8 @@ async function main() {
     }
   }
 
+  if (!INJECT_CONTEXT) return;
+
   try {
     const res = await fetch(`${REST_URL}/agentmemory/context`, {
       method: "POST",
@@ -56,14 +65,23 @@ async function main() {
     });
 
     if (res.ok) {
-      const result = (await res.json()) as { context?: string };
-      if (result.context) {
-        process.stdout.write(result.context);
-      }
+      const result = (await res.json()) as {
+        context?: string;
+        accounting?: ContextReductionAccounting;
+      };
+      if (result.context) process.stdout.write(result.context);
+      await recordContextReduction({
+        restUrl: REST_URL,
+        secret: SECRET,
+        accounting: result.accounting,
+        source: "pre_compact",
+        sessionId,
+        project,
+      });
     }
   } catch {
     // best effort -- don't block compaction
   }
 }
 
-main();
+main().catch(() => process.exit(0));

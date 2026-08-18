@@ -95,10 +95,16 @@ function rest(): string {
     const mm = /http_method:\s*"([A-Z]+)"/.exec(win);
     found.push({ path, method: mm ? mm[1] : "POST" });
   }
+  // Dedupe on method+path, not path alone: ten paths register both GET and
+  // POST, and a path-only dedupe hid the second method and undercounted the
+  // surface (119 listed vs 130 registered).
   const seen = new Set<string>();
   const rows = found
-    .filter((e) => (seen.has(e.path) ? false : (seen.add(e.path), true)))
-    .sort((a, b) => a.path.localeCompare(b.path));
+    .filter((e) => {
+      const key = `${e.method} ${e.path}`;
+      return seen.has(key) ? false : (seen.add(key), true);
+    })
+    .sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
   const lines = [
     `The REST API is the primary surface. All paths are under \`http://localhost:3111\` (override with \`--port\`). When \`AGENTMEMORY_SECRET\` is set, send \`Authorization: Bearer $AGENTMEMORY_SECRET\`; localhost is otherwise open.`,
     "",
@@ -146,13 +152,26 @@ function agents(): string {
 }
 
 function hooks(): string {
-  const file = join(ROOT, "plugin", "hooks", "hooks.json");
-  const json = JSON.parse(readFileSync(file, "utf8")) as { hooks?: Record<string, unknown> };
-  const events = Object.keys(json.hooks ?? {}).sort();
+  const readEvents = (name: string): string[] => {
+    const file = join(ROOT, "plugin", "hooks", name);
+    const json = JSON.parse(readFileSync(file, "utf8")) as {
+      hooks?: Record<string, unknown>;
+    };
+    return Object.keys(json.hooks ?? {}).sort();
+  };
+  const claudeEvents = readEvents("hooks.json");
+  const codexEvents = readEvents("hooks.codex.json");
   const lines = [
-    `The Claude Code plugin registers hooks on ${events.length} lifecycle events to capture observations automatically:`,
+    `Claude Code registers ${claudeEvents.length} lifecycle events; Codex registers its supported ${codexEvents.length}-event subset. Both capture observations automatically, and Codex includes telemetry-only subagent lifecycle coverage for local delegated threads.`,
     "",
-    ...events.map((e) => `- \`${e}\``),
+    "| Event | Claude Code | Codex |",
+    "| --- | --- | --- |",
+    ...[...new Set([...claudeEvents, ...codexEvents])]
+      .sort()
+      .map(
+        (event) =>
+          `| \`${event}\` | ${claudeEvents.includes(event) ? "yes" : ""} | ${codexEvents.includes(event) ? "yes" : ""} |`,
+      ),
   ];
   return lines.join("\n");
 }

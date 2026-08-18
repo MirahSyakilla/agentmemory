@@ -4,7 +4,7 @@ description: The agentmemory plugin hooks that capture observations automaticall
 user-invocable: false
 ---
 
-The Claude Code plugin registers lifecycle hooks so memory is captured automatically. You do not have to call `memory_save` for routine work; the hooks observe tool use, prompts, and session boundaries and write observations for you.
+The Claude Code and Codex plugin manifests register lifecycle hooks so memory is captured automatically. You do not have to call `memory_save` for routine work; the hooks observe tool use, prompts, and session boundaries and write observations for you. Codex uses the supported subset of events and includes telemetry-only `SubagentStart`/`SubagentStop` coverage for local delegated threads; those threads inherit MCP servers but not the parent's emitted SessionStart context.
 
 ## Quick start
 
@@ -19,7 +19,7 @@ Watch observations land live at `http://localhost:3113`.
 
 ## What the hooks do
 
-- Session start and end frame each unit of work and let `handoff` resume it.
+- SessionStart opens or resumes a thread, Stop checkpoints each turn without closing the thread, and SessionEnd completes the session on hosts that expose it. Codex threads without SessionEnd are completed after the configured idle timeout.
 - Tool-use hooks capture what changed and why, the raw material for `recall` and `recap`.
 - Prompt-submit captures intent. Pre-compact preserves context before the host trims it.
 - A post-commit hook links commits to sessions, which powers `commit-context` and `commit-history`.
