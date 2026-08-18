@@ -52,18 +52,15 @@ Full agentmemory methodology: [`LONGMEMEVAL.md`](LONGMEMEVAL.md)
 
 ## Token Efficiency
 
-The main reason to use persistent memory at all: token cost. Here's what one year of heavy agent use looks like across approaches.
+The main reason to use persistent memory at all is context efficiency. The reproducible real-embeddings evaluation compares the same corpus representation on both sides.
 
-| Approach | Tokens / year | Cost / year | Notes |
-|---|---|---|---|
-| Paste full history into context | 19.5M+ | Impossible | Exceeds context window after ~200 observations |
-| LLM-summarized memory (extraction-based) | ~650K | ~$500 | Lossy — summarization drops detail |
-| **agentmemory (API embeddings)** | **~170K** | **~$10** | Token-budgeted, only relevant memories injected |
-| **agentmemory (local embeddings)** | **~170K** | **$0** | `all-MiniLM-L6-v2` runs in-process |
-| supermemory | Not published | Cloud pricing | Managed API, no local token budget |
-| Mem0 | Varies by integration | Varies | Extraction-based, no token budget |
+| Approach | Estimated tokens / query | Notes |
+|---|---|---|
+| Load the full evaluation corpus | 19,462 | Eventually exceeds the model context window |
+| **agentmemory top results** | **1,571** | Retrieval stays bounded as stored history grows |
+| **Estimated context reduction** | **92%** | Benchmark-specific `characters / 4` estimator |
 
-**agentmemory ships with a built-in token savings calculator.** Run `npx @agentmemory/agentmemory status` after a few sessions and you'll see exactly how many tokens you've saved vs. pasting the full history.
+For live use, `agentmemory status` and the viewer separate historical automatic hook emissions from explicit MCP recall responses. They measure the exact delivered text with `characters / 3`, and calculate a transparent GPT-5.6 Sol input-cost counterfactual against the complete retrievable corpus. The estimate uses the official [pricing table](https://developers.openai.com/api/docs/pricing), shows cached-read/uncached/cache-write scenarios, and is not host-reported billing; host usage attribution or a matched fresh-chat A/B is still needed for measured end-to-end savings.
 
 ---
 
@@ -120,6 +117,22 @@ This isn't a "agentmemory wins everything" page. Different tools solve different
 - Biologically-inspired memory model (decay, consolidation, sleep)
 - Multi-agent shared memory as a primary feature
 - "Forget by default, earn persistence through use" philosophy
+
+**Choose TencentDB Agent Memory if you want:**
+- Team-level shared memory: conversations, docs, and code turned into four asset types (Chat Memory, Skill, Wiki, CodeGraph) with team roles and ownership
+- Zero-integration capture via an LLM proxy (point the agent's base URL at it; no hooks or MCP required)
+- CodeGraph impact analysis (symbols, call relationships) alongside memory
+- Note: the proxy sits in front of every model call, deployment is a multi-service Docker stack (Core + Hub + Proxy), the published benchmark is PersonaMem (76%, self-reported), and automated memory routing is still in progress per their README
+
+**Choose Zep / Graphiti if you want:**
+- A temporal knowledge graph: facts carry a time dimension, so "what was true when" is a first-class query
+- The strongest published temporal-query results (LongMemEval 63.8%)
+- Note: graph construction runs in the background, so freshly ingested facts can take time to become retrievable, and per-conversation memory footprint is reported to run far above extraction-based systems
+
+**Choose Cognee if you want:**
+- Knowledge-graph construction from documents and structured data before query time
+- Entity-relationship extraction as the primary product rather than session capture
+- Note: Python-only, and built for document ingestion rather than coding-agent memory
 
 ---
 
