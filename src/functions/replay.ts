@@ -11,13 +11,15 @@ import type {
   Session,
   SessionSummary,
 } from "../types.js";
+import { importOrigin } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId, fingerprintId } from "../state/schema.js";
 import { parseJsonlText } from "../replay/jsonl-parser.js";
+import { resetLessonIndex } from "./lessons.js";
 import { projectTimeline, type Timeline } from "../replay/timeline.js";
 import { safeAudit } from "./audit.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
-import { lexicalIndexAdd } from "./search.js";
+import { indexRecords } from "./search.js";
 import { logger } from "../logger.js";
 import { buildDeterministicSummary } from "./summarize.js";
 
@@ -161,6 +163,7 @@ async function deriveCrystalAndLessons(
       lessonIds.push(lessonId);
     } catch {}
   }
+  if (lessonIds.length > 0) resetLessonIndex();
 
   // Content-addressed on sessionId so re-importing the same session
   // upserts the crystal in place instead of creating a new one.
@@ -566,11 +569,24 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
         await Promise.all(
           parsed.observations.map(async (obs) => {
             const synthetic = buildSyntheticCompression(obs);
+            synthetic.origin = importOrigin(
+              synthetic.origin,
+              synthetic.timestamp,
+              "jsonl",
+            );
             compressed.push(synthetic);
             await kv.set(KV.observations(parsed.sessionId), obs.id, synthetic);
-            await lexicalIndexAdd(synthetic);
           }),
         );
+        // BM25 + vector in one path so jsonl-imported observations are
+        // reachable by semantic search, not just keyword.
+        try {
+          await indexRecords(compressed, []);
+        } catch (err) {
+          logger.warn("Import indexing failed; restart rebuild will recover", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         observationCount += parsed.observations.length;
         sessionIds.push(parsed.sessionId);
 

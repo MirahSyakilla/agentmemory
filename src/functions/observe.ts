@@ -1,5 +1,7 @@
 import { TriggerAction, type ISdk } from "iii-sdk";
-import type { RawObservation, HookPayload } from "../types.js";
+import type { RawObservation, HookPayload, Origin, Session } from "../types.js";
+
+const TOOL_HOOKS = new Set(["pre_tool_use", "post_tool_use", "post_tool_failure"]);
 import { KV, STREAM, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
@@ -10,6 +12,7 @@ import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { lexicalIndexAdd, vectorIndexAddGuarded } from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
+import { saveImageToDisk } from "../utils/image-store.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -62,15 +65,24 @@ export function registerObserveFunction(
 
       let dedupHash: string | undefined;
       if (dedupMap) {
-        const d =
-          typeof payload.data === "object" && payload.data !== null
-            ? (payload.data as Record<string, unknown>)
-            : {};
+        const dataIsObject =
+          typeof payload.data === "object" && payload.data !== null;
+        const d = dataIsObject
+          ? (payload.data as Record<string, unknown>)
+          : {};
         const toolName = (d["tool_name"] as string) || payload.hookType;
+        // Hash the full payload when tool_input is absent so distinct
+        // events never collapse onto one key.
+        const dedupInput =
+          d["tool_input"] !== undefined
+            ? d["tool_input"]
+            : dataIsObject
+              ? d
+              : payload.data;
         dedupHash = dedupMap.computeHash(
           payload.sessionId,
           toolName,
-          d["tool_input"],
+          dedupInput,
         );
         if (dedupMap.isDuplicate(dedupHash)) {
           return { deduplicated: true, sessionId: payload.sessionId };
@@ -86,12 +98,19 @@ export function registerObserveFunction(
         sanitizedRaw = stripPrivateData(String(payload.data));
       }
 
+      let originChannel: Origin["channel"] = "agent";
+      if (payload.hookType === "prompt_submit") originChannel = "user";
+      else if (TOOL_HOOKS.has(payload.hookType)) originChannel = "tool";
       const raw: RawObservation = {
         id: obsId,
         sessionId: payload.sessionId,
         timestamp: payload.timestamp,
         hookType: payload.hookType,
         raw: sanitizedRaw,
+        origin: {
+          channel: originChannel,
+          capturedAt: payload.timestamp,
+        },
       };
 
       let extractedImage: string | undefined;
@@ -105,6 +124,7 @@ export function registerObserveFunction(
           raw.toolName = d["tool_name"] as string | undefined;
           raw.toolInput = d["tool_input"];
           raw.toolOutput = d["tool_output"] || d["error"];
+          if (raw.origin && raw.toolName) raw.origin.detail = raw.toolName;
         }
         if (payload.hookType === "prompt_submit") {
           raw.userPrompt = d["prompt"] as string | undefined;
@@ -128,11 +148,10 @@ export function registerObserveFunction(
         // undefined). Env AGENT_ID only fires when no session row
         // exists yet — otherwise an unscoped session would get
         // retroactively scoped by a later AGENT_ID export.
-        const existingSession = await kv.get<{
-          agentId?: string;
-          observationCount?: number;
-          firstPrompt?: string;
-        }>(KV.sessions, payload.sessionId);
+        const existingSession = await kv.get<Session & { updatedAt?: string }>(
+          KV.sessions,
+          payload.sessionId,
+        );
 
         if (maxObservationsPerSession && maxObservationsPerSession > 0) {
           const currentCount =
@@ -155,7 +174,6 @@ export function registerObserveFunction(
         }
 
         if (pendingImageData && (pendingImageData.startsWith("data:image/") || pendingImageData.startsWith("iVBORw0KGgo") || pendingImageData.startsWith("/9j/"))) {
-          const { saveImageToDisk } = await import("../utils/image-store.js");
           const { filePath, bytesWritten } = await saveImageToDisk(pendingImageData);
           raw.imageData = filePath;
           const { incrementImageRef } = await import("./image-refs.js");
@@ -184,13 +202,19 @@ export function registerObserveFunction(
 
         } catch (error) {
           if (raw.imageData) {
-            const { deleteImage } = await import("../utils/image-store.js");
-            const { deletedBytes } = await deleteImage(raw.imageData);
-            if (deletedBytes > 0) {
-              sdk.trigger({
-                function_id: "mem::disk-size-delta",
-                payload: { deltaBytes: -deletedBytes },
-                action: TriggerAction.Void(),
+            // Roll back the ref taken above. decrementImageRef deletes the file
+            // only when no other observation still references it (deduped images
+            // survive) and emits the disk-size delta itself — deleting the file
+            // directly here would orphan shared images and leave a stale ref.
+            // If the rollback itself fails, log it but still surface the
+            // original write error (the more useful failure to diagnose).
+            try {
+              const { decrementImageRef } = await import("./image-refs.js");
+              await decrementImageRef(kv, sdk, raw.imageData);
+            } catch (rollbackError) {
+              logger.error("Failed to roll back image ref after observation write failure", {
+                imageRef: raw.imageData,
+                error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
               });
             }
           }
@@ -225,25 +249,47 @@ export function registerObserveFunction(
 
         const session = existingSession;
         if (session) {
-          const updates: Array<{ type: "set"; path: string; value: unknown }> = [
-            { type: "set", path: "updatedAt", value: new Date().toISOString() },
-            {
-              type: "set",
-              path: "observationCount",
-              value: (session.observationCount || 0) + 1,
-            },
-          ];
-          if (!session.firstPrompt && typeof raw.userPrompt === "string") {
-            const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
-            if (trimmed.length > 0) {
+          const updatedAt = new Date().toISOString();
+          const observationCount = (session.observationCount || 0) + 1;
+          const firstPrompt =
+            !session.firstPrompt && typeof raw.userPrompt === "string"
+              ? raw.userPrompt.replace(/\s+/g, " ").trim().slice(0, 200)
+              : undefined;
+          if (
+            payload.hookType === "prompt_submit" &&
+            session.status !== "active"
+          ) {
+            const resumedSession = {
+              ...session,
+              status: "active" as const,
+              updatedAt,
+              observationCount,
+              ...(firstPrompt ? { firstPrompt } : {}),
+            };
+            delete resumedSession.endedAt;
+            await kv.set(KV.sessions, payload.sessionId, resumedSession);
+          } else {
+            const updates: Array<{
+              type: "set";
+              path: string;
+              value: unknown;
+            }> = [
+              { type: "set", path: "updatedAt", value: updatedAt },
+              {
+                type: "set",
+                path: "observationCount",
+                value: observationCount,
+              },
+            ];
+            if (firstPrompt) {
               updates.push({
                 type: "set",
                 path: "firstPrompt",
-                value: trimmed.slice(0, 200),
+                value: firstPrompt,
               });
             }
+            await kv.update(KV.sessions, payload.sessionId, updates);
           }
-          await kv.update(KV.sessions, payload.sessionId, updates);
         } else if (
           typeof payload.project === "string" &&
           payload.project.trim().length > 0 &&
@@ -278,7 +324,7 @@ export function registerObserveFunction(
           });
         }
 
-        // Per-observation LLM compression is opt-in as of 0.8.8 (#138).
+        // Per-observation LLM compression is opt-in as of 0.8.8.
         // Default path: build a zero-LLM synthetic compression so recall
         // and BM25 search still work without burning the user's Claude
         // token allocation on every tool invocation.

@@ -144,7 +144,7 @@ export async function resolveHandle(): Promise<Handle> {
               ...authHeader(),
               ...(init?.headers as Record<string, string> | undefined),
             },
-            signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+            signal: init?.signal ?? AbortSignal.timeout(CALL_TIMEOUT_MS),
           });
           if (!res.ok) {
             throw new Error(

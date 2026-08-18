@@ -19,6 +19,36 @@ let vectorStore: VectorStore | null = null
 let currentEmbeddingProvider: EmbeddingProvider | null = null
 let searchIndexMaxItems = Number.POSITIVE_INFINITY
 
+// Hybrid ranking hook for mem::search. Wired by index.ts once the
+// hybrid searcher exists (it is constructed after this module's
+// registration runs). When set and the vector index has entries,
+// mem::search ranks candidates through the full BM25+vector+graph
+// fusion instead of BM25 alone — previously only mem::smart-search got
+// hybrid ranking while the primary recall surface stayed keyword-only.
+type HybridRanker = (
+  query: string,
+  limit: number,
+) => Promise<Array<{ observation: CompressedObservation; sessionId: string; combinedScore: number }>>
+let hybridRanker: HybridRanker | null = null
+
+export function setHybridRanker(fn: HybridRanker | null): void {
+  hybridRanker = fn
+}
+
+// Dedupes the lazy cold-start rebuild kicked off from the mem::search
+// request path. A full rebuildIndex walks every observation across every
+// session, so N concurrent queries against an empty index would each
+// launch their own rebuild and saturate the engine invocation pool. The
+// first query with an empty index starts one rebuild and shares its
+// promise; concurrent queries await the same rebuild instead of spawning
+// duplicates. The boot-time rebuild in index.ts is unaffected.
+let rebuildPromise: Promise<number> | null = null
+
+let memoryIndexReady = false
+export function isMemoryIndexReady(): boolean {
+  return memoryIndexReady
+}
+
 export function getSearchIndex(): SearchIndex {
   if (!index) index = new SearchIndex(searchIndexMaxItems)
   return index
@@ -301,6 +331,66 @@ function getRebuildEmbedBatchSize(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_REBUILD_EMBED_BATCH
 }
 
+// Shared BM25 + batched-vector indexing for a set of records. The full
+// rebuild and every import path (export-import, jsonl replay) funnel
+// through this so they index identically and none can silently skip the
+// vector side. It does NOT clear the index — callers that rebuild clear
+// first; importers add. When no embedding provider is configured it skips
+// the vector enqueue entirely, so a keyless install never allocates embed
+// jobs it would immediately discard.
+export async function indexRecords(
+  observations: CompressedObservation[],
+  memories: Memory[],
+): Promise<number> {
+  const idx = getLexicalStore()
+  const vectorEnabled = Boolean(vectorStore && currentEmbeddingProvider)
+  const batchSize = getRebuildEmbedBatchSize()
+  type EmbedJob = {
+    id: string
+    sessionId: string
+    text: string
+    context: { kind: "memory" | "observation" | "synthetic"; logId: string }
+  }
+  const pending: EmbedJob[] = []
+  const flush = async (): Promise<void> => {
+    if (pending.length === 0) return
+    await vectorIndexAddBatchGuarded(pending)
+    pending.length = 0
+  }
+  const enqueue = async (job: EmbedJob): Promise<void> => {
+    if (!vectorEnabled) return
+    pending.push(job)
+    if (pending.length >= batchSize) await flush()
+  }
+
+  let count = 0
+  for (const memory of memories) {
+    if (memory.isLatest === false) continue
+    if (!memory.title || !memory.content) continue
+    idx.add(memoryToObservation(memory))
+    await enqueue({
+      id: memory.id,
+      sessionId: memory.sessionIds?.[0] ?? 'memory',
+      text: memory.title + ' ' + memory.content,
+      context: { kind: "memory", logId: memory.id },
+    })
+    count++
+  }
+  for (const obs of observations) {
+    if (!obs.title || !obs.narrative) continue
+    idx.add(obs)
+    await enqueue({
+      id: obs.id,
+      sessionId: obs.sessionId,
+      text: obs.title + ' ' + obs.narrative,
+      context: { kind: "observation", logId: obs.id },
+    })
+    count++
+  }
+  await flush()
+  return count
+}
+
 export async function rebuildIndex(kv: StateKV): Promise<number> {
   const idx = getLexicalStore()
   const bulkIndex = idx as LexicalStore & {
@@ -309,74 +399,41 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   }
   bulkIndex.beginBulk?.()
   try {
-    idx.clear()
-    const maxItems = idx.capacity
+    await idx.clear()
+  memoryIndexReady = false
 
-    // BM25 clear above wipes stale doc entries; the vector index has the
-    // symmetric concern — memories/observations deleted between runs
-    // would leave orphan embeddings here forever. Clear both before the
-    // repopulation loops run, so BM25 and vector stay in sync.
+  // BM25 clear above wipes stale doc entries; the vector index has the
+  // symmetric concern — memories/observations deleted between runs
+  // would leave orphan embeddings here forever. Clear both before the
+  // repopulation loops run, so BM25 and vector stay in sync.
     try {
       await vectorStore?.clear()
     } catch (err) {
-      logger.warn('rebuildIndex: failed to clear vector index', {
+      logger.warn("rebuildIndex: failed to clear vector index", {
         backend: vectorStore?.backend ?? "memory",
         error: err instanceof Error ? err.message : String(err),
       })
     }
 
-    const batchSize = getRebuildEmbedBatchSize()
-  // Accumulator for the batched embed flush. BM25 add is synchronous and
-  // doesn't need batching — only the vector path benefits.
-    type EmbedJob = {
-    id: string
-    sessionId: string
-    text: string
-    context: { kind: "memory" | "observation" | "synthetic"; logId: string }
-  }
-    const pending: EmbedJob[] = []
-    let count = 0
-
-    const flush = async (): Promise<void> => {
-    if (pending.length === 0) return
-    await vectorIndexAddBatchGuarded(pending)
-    pending.length = 0
-  }
-    const enqueue = async (job: EmbedJob): Promise<void> => {
-    pending.push(job)
-    if (pending.length >= batchSize) await flush()
-  }
-
   // Memories live in their own KV scope outside per-session observation
   // scopes, so they need a separate walk. Without this, mem::remember
   // entries vanish from BM25 on every restart even after the live-write
-  // fix in remember.ts (#257).
+  // fix in remember.ts.
+    let memories: Memory[] = []
+    let memoriesLoaded = false
     try {
-      const memories = await kv.list<Memory>(KV.memories)
-      for (const memory of memories) {
-        if (count >= maxItems) break
-        if (memory.isLatest === false) continue
-        if (!memory.title || !memory.content) continue
-        idx.add(memoryToObservation(memory))
-        await enqueue({
-          id: memory.id,
-          sessionId: memory.sessionIds?.[0] ?? 'memory',
-          text: memory.title + ' ' + memory.content,
-          context: { kind: "memory", logId: memory.id },
-        })
-        count++
-      }
+      memories = await kv.list<Memory>(KV.memories)
+      memoriesLoaded = true
     } catch (err) {
       logger.warn('rebuildIndex: failed to load memories', {
         error: err instanceof Error ? err.message : String(err),
       })
     }
 
+    const maxItems = idx.capacity
     const sessions = await kv.list<Session>(KV.sessions)
-    if (!sessions.length) {
-      await flush()
-      return count
-    }
+    const failedSessions: string[] = []
+    const skippedLargeSessions: string[] = []
     const rebuildSessionMax =
       Number.isFinite(maxItems) && maxItems > 0
         ? Math.max(1, Math.min(maxItems, 5_000))
@@ -388,11 +445,8 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
           String(a.updatedAt ?? a.startedAt ?? ""),
         ),
       )
-
-    const failedSessions: string[] = []
-    const skippedLargeSessions: string[] = []
     const plannedSessions: Session[] = []
-    let estimatedIndexed = count
+    let estimatedIndexed = 0
     for (const session of orderedSessions) {
       if (estimatedIndexed >= maxItems) break
       const obsCount = session.observationCount ?? 0
@@ -403,33 +457,35 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
       plannedSessions.push(session)
       estimatedIndexed += Math.max(obsCount, 1)
     }
-    plannedSessions.reverse()
-    for (let batch = 0; batch < plannedSessions.length && count < maxItems; batch += 10) {
+
+  // Index each session chunk as it loads instead of accumulating every
+  // observation first, so peak memory stays bounded to one chunk.
+    let indexed = 0
+    for (
+      let batch = 0;
+      batch < plannedSessions.length && indexed < maxItems;
+      batch += 10
+    ) {
       const chunk = plannedSessions.slice(batch, batch + 10)
-      const results = await Promise.all(
-        chunk.map(async (s) => {
-          try {
-            return await kv.list<CompressedObservation>(KV.observations(s.id))
-          } catch {
-            failedSessions.push(s.id)
-            return [] as CompressedObservation[]
-          }
-        })
-      )
-      for (const observations of results) {
-        for (const obs of observations) {
-          if (count >= maxItems) break
-          if (obs.title && obs.narrative) {
-            idx.add(obs)
-            await enqueue({
-              id: obs.id,
-              sessionId: obs.sessionId,
-              text: obs.title + ' ' + obs.narrative,
-              context: { kind: "observation", logId: obs.id },
-            })
-            count++
-          }
+    const results = await Promise.all(
+      chunk.map(async (s) => {
+        try {
+          return await kv.list<CompressedObservation>(KV.observations(s.id))
+        } catch {
+          failedSessions.push(s.id)
+          return [] as CompressedObservation[]
         }
+      })
+    )
+      const remaining = Number.isFinite(maxItems)
+        ? Math.max(0, maxItems - indexed)
+        : Number.POSITIVE_INFINITY
+      const chunkObs = results
+        .flat()
+        .filter((obs) => Boolean(obs.title) && Boolean(obs.narrative))
+        .slice(0, remaining)
+      if (chunkObs.length > 0) {
+        indexed += await indexRecords(chunkObs, [])
       }
     }
     if (failedSessions.length > 0) {
@@ -442,9 +498,15 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
       })
     }
 
-    // Drain the last partial batch.
-    await flush()
-    return count
+    const memoryLimit = Number.isFinite(maxItems)
+      ? Math.max(0, maxItems - indexed)
+      : undefined
+    indexed += await indexRecords(
+      [],
+      memoryLimit === undefined ? memories : memories.slice(0, memoryLimit),
+    )
+    if (memoriesLoaded) memoryIndexReady = true
+    return indexed
   } finally {
     bulkIndex.endBulk?.()
   }
@@ -528,8 +590,25 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       if (idx.size === 0) {
-        const count = await rebuildIndex(kv)
-        logger.info('Search index rebuilt', { entries: count })
+        // Share one rebuild across concurrent cold-start queries so they
+        // don't each walk the whole corpus and saturate the pool.
+        if (!rebuildPromise) {
+          rebuildPromise = rebuildIndex(kv)
+            .then((count) => {
+              logger.info('Search index rebuilt', { entries: count })
+              return count
+            })
+            .catch((err) => {
+              logger.warn('Index rebuild failed', {
+                error: err instanceof Error ? err.message : String(err),
+              })
+              return 0
+            })
+            .finally(() => {
+              rebuildPromise = null
+            })
+        }
+        await rebuildPromise
       }
 
       // When filtering by project/cwd, over-fetch from the index so the
@@ -541,7 +620,33 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // rank lower than cross-agent ones in the hybrid score.
       const filtering = !!(projectFilter || cwdFilter || filterAgentId)
       const fetchLimit = filtering ? Math.max(effectiveLimit * 10, 100) : effectiveLimit
-      const results = idx.search(query, fetchLimit)
+      // Hybrid results carry the observation the ranker already loaded,
+      // so the load pass below doesn't refetch every record it just
+      // enriched.
+      let results: Array<{
+        obsId: string
+        sessionId: string
+        score: number
+        observation?: CompressedObservation
+      }>
+      if (hybridRanker && vectorStore && vectorStore.size > 0) {
+        try {
+          const hybrid = await hybridRanker(query, fetchLimit)
+          results = hybrid.map((r) => ({
+            obsId: r.observation.id,
+            sessionId: r.sessionId,
+            score: r.combinedScore,
+            observation: r.observation,
+          }))
+        } catch (err) {
+          logger.warn("hybrid ranking failed, falling back to keyword search", {
+            error: err instanceof Error ? err.message : String(err),
+          })
+          results = await idx.search(query, fetchLimit)
+        }
+      } else {
+        results = await idx.search(query, fetchLimit)
+      }
 
       // Resolve session -> project/cwd once per sessionId we touch.
       const sessionCache = new Map<string, Session | null>()
@@ -615,6 +720,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // sessionId, so the observation key never exists (#265).
       const obsResults = await Promise.all(
         candidates.map(async (r) => {
+          if (r.observation) return r.observation
           const obs = await kv
             .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
             .catch(() => null)

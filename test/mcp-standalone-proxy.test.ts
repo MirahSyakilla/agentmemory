@@ -55,8 +55,13 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
 
   it("proxies memory_smart_search to POST /agentmemory/smart-search", async () => {
     let smartSearchBody: Record<string, unknown> | undefined;
+    let deliveryBody: Record<string, unknown> | undefined;
     installFetch((url, init) => {
       if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      if (url.endsWith("/agentmemory/context-reduction/events")) {
+        deliveryBody = JSON.parse((init?.body as string) || "{}");
+        return new Response(JSON.stringify({ success: true }), { status: 201 });
+      }
       if (url.endsWith("/agentmemory/smart-search")) {
         const body = JSON.parse((init?.body as string) || "{}");
         smartSearchBody = body;
@@ -84,6 +89,12 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       limit: 5,
       project: "api",
     });
+    const accounting = deliveryBody?.accounting as Record<string, unknown>;
+    expect(deliveryBody?.source).toBe("mcp_smart_search");
+    expect(deliveryBody?.project).toBe("api");
+    expect(accounting.baselineTokens).toBe(0);
+    expect(accounting.returnedTokens).toBe(Math.ceil(res.content[0].text.length / 3));
+    expect(accounting.tokenDelta).toBe(-Math.ceil(res.content[0].text.length / 3));
   });
 
   it("proxies memory_recall to POST /agentmemory/search and forwards format/token_budget (#507)", async () => {
@@ -103,6 +114,9 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
+      }
+      if (url.endsWith("/agentmemory/context-reduction/events")) {
+        return new Response(JSON.stringify({ success: true }), { status: 201 });
       }
       return new Response("not found", { status: 404 });
     });
@@ -126,6 +140,12 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       project: "api",
     });
     expect(calls.find((c) => c.url.endsWith("/agentmemory/smart-search"))).toBeUndefined();
+    const deliveryCall = calls.find((c) => c.url.endsWith("/agentmemory/context-reduction/events"));
+    const accounting = (deliveryCall?.body as { accounting?: Record<string, unknown> })?.accounting;
+    expect(deliveryCall?.body).toMatchObject({ source: "mcp_recall", project: "api" });
+    expect(accounting?.baselineTokens).toBe(0);
+    expect(accounting?.returnedTokens).toBe(Math.ceil(res.content[0].text.length / 3));
+    expect(accounting?.tokenDelta).toBe(-Math.ceil(res.content[0].text.length / 3));
   });
 
   it("proxies memory_save with project to POST /agentmemory/remember", async () => {

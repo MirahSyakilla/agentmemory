@@ -2,6 +2,8 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
+import { getSessionLastActivity } from "../utils/session-activity.js";
+import { getSessionIdleTimeoutMs } from "../config.js";
 import { recordAudit } from "./audit.js";
 import type {
   Action,
@@ -40,7 +42,6 @@ const ALL_CATEGORIES = [
   "mesh",
 ];
 
-const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
 export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
@@ -289,18 +290,22 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
 
       if (categories.includes("sessions")) {
         const sessions = await kv.list<Session>(KV.sessions);
+        const sessionIdleTimeoutMs = getSessionIdleTimeoutMs();
         let sessionIssues = 0;
 
         for (const session of sessions) {
+          const lastActivity = getSessionLastActivity(session);
           if (
             session.status === "active" &&
-            now - new Date(session.startedAt).getTime() > TWENTY_FOUR_HOURS_MS
+            sessionIdleTimeoutMs > 0 &&
+            lastActivity !== null &&
+            now - lastActivity.timestampMs > sessionIdleTimeoutMs
           ) {
             checks.push({
               name: `abandoned-session:${session.id}`,
               category: "sessions",
               status: "warn",
-              message: `Session ${session.id} has been active for over 24 hours`,
+              message: `Session ${session.id} exceeded the configured idle timeout`,
               fixable: false,
             });
             sessionIssues++;

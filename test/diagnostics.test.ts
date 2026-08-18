@@ -405,6 +405,48 @@ describe("Diagnostics Functions", () => {
       expect(check!.fixable).toBe(false);
     });
 
+    it("does not warn for an old session with recent activity", async () => {
+      const session = makeSession({
+        status: "active",
+        startedAt: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
+        updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      });
+      await kv.set(KV.sessions, session.id, session);
+
+      const result = (await sdk.trigger("mem::diagnose", {
+        categories: ["sessions"],
+      })) as { checks: DiagnosticCheck[] };
+
+      expect(
+        result.checks.find((c) =>
+          c.name.startsWith("abandoned-session:"),
+        ),
+      ).toBeUndefined();
+    });
+
+    it("uses the configured session idle timeout", async () => {
+      vi.stubEnv("AGENTMEMORY_SESSION_IDLE_TIMEOUT_MS", String(48 * 60 * 60 * 1000));
+      try {
+        const session = makeSession({
+          status: "active",
+          startedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        });
+        await kv.set(KV.sessions, session.id, session);
+
+        const result = (await sdk.trigger("mem::diagnose", {
+          categories: ["sessions"],
+        })) as { checks: DiagnosticCheck[] };
+
+        expect(
+          result.checks.find((c) =>
+            c.name.startsWith("abandoned-session:"),
+          ),
+        ).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it("memory with stale isLatest produces fail (fixable)", async () => {
       const oldMemory = makeMemory({ isLatest: true });
       const newMemory = makeMemory({ supersedes: [oldMemory.id] });

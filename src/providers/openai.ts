@@ -274,6 +274,7 @@ export class OpenAIProvider implements MemoryProvider {
           body: JSON.stringify(body),
         },
         this.timeoutMs,
+        this.fallbackBaseUrl ? { maxAttempts: 1 } : undefined,
       );
     } catch (err) {
       const aborted = err instanceof Error && err.name === "AbortError";

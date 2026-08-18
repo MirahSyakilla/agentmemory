@@ -12,7 +12,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_recall",
     description:
-      "Use when you need to recall what happened in previous sessions, find past decisions, or look up how a file was modified before.",
+      "Use when you need focused details from previous sessions, past decisions, or earlier file changes. Prefer compact format or a small token_budget first, then request fuller results only when needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -87,6 +87,12 @@ export const CORE_TOOLS: McpToolDef[] = [
             "started. Do not use filesystem paths or ad-hoc display names — those " +
             "change across machines and will silently break project scoping.",
         },
+        agentId: {
+          type: "string",
+          description:
+            "Agent identity to scope this memory to. When set, agent-scoped recall " +
+            "and search only surface it for the same agentId. Omit for shared memory.",
+        },
       },
       required: ["content"],
     },
@@ -127,7 +133,7 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_smart_search",
     description:
-      "Use for broad exploratory search when you don't know the exact terms or keyword search returns too little. Hybrid semantic+keyword — returns initial matches; expand with expandIds to get full details.",
+      "Use for broad exploratory recall when you don't know the exact terms or keyword search returns too little. Hybrid semantic+keyword — returns compact initial matches; expand only the IDs needed for full details.",
     inputSchema: {
       type: "object",
       properties: {
@@ -821,6 +827,18 @@ export const V070_TOOLS: McpToolDef[] = [
     },
   },
   {
+    name: "memory_lesson_delete",
+    description:
+      "Use to soft-delete a lesson by id. Deleted lessons are excluded from recall and list; re-saving the same content creates a fresh lesson.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lessonId: { type: "string", description: "The lesson id (lsn_...)" },
+      },
+      required: ["lessonId"],
+    },
+  },
+  {
     name: "memory_obsidian_export",
     description:
       "Use to export memories as Obsidian-compatible Markdown — for manual review, sharing with humans, or archiving in a personal note-taking system. Includes YAML frontmatter and wikilinks.",
@@ -975,8 +993,8 @@ export function getAllTools(): McpToolDef[] {
 }
 
 // default switched from "core" (8 essential tools) to "all"
-// (full 53-tool surface). README and plugin manifests have always
-// advertised 53 tools "in proxy mode"; the old default left OpenCode /
+// (full 54-tool surface). README and plugin manifests have always
+// advertised 54 tools "in proxy mode"; the old default left OpenCode /
 // Claude Code users seeing 8 with no indication the other tools existed.
 // Users who want the lean essentials can still set AGENTMEMORY_TOOLS=core.
 export function getVisibleTools(): McpToolDef[] {

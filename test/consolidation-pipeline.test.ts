@@ -5,6 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 vi.mock("../src/config.js", () => ({
+  getEnvVar: () => undefined,
   getConsolidationDecayDays: () => 30,
   isConsolidationEnabled: vi.fn(() => true),
 }));

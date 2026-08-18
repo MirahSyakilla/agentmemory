@@ -12,6 +12,7 @@ import { getVisibleTools } from "./tools-registry.js";
 import { timingSafeCompare } from "../auth.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
 import { logger } from "../logger.js";
+import { createContextDeliveryAccounting } from "../utils/token-estimate.js";
 
 type McpResponse = {
   status_code: number;
@@ -39,6 +40,24 @@ function parseCsvList(value: unknown): string[] {
       .filter(Boolean);
   }
   return [];
+}
+
+function recordMcpContextDelivery(
+  sdk: ISdk,
+  source: "mcp_recall" | "mcp_smart_search" | "mcp_vision_search",
+  text: string,
+  project?: string,
+): void {
+  void sdk
+    .trigger({
+      function_id: "mem::context-reduction-record",
+      payload: {
+        accounting: createContextDeliveryAccounting(text),
+        source,
+        ...(project ? { project } : {}),
+      },
+    })
+    .catch(() => {});
 }
 
 export function registerMcpEndpoints(
@@ -122,12 +141,14 @@ export function registerMcpEndpoints(
               typeof args.agentId === "string" && args.agentId.trim().length > 0
                 ? (args.agentId as string).trim()
                 : undefined;
+            const project = asNonEmptyString(args.project);
             const result = await sdk.trigger({ function_id: "mem::search", payload: {
               query: args.query,
               limit: typeof args.limit === "number" ? args.limit : 10,
               format,
               token_budget: tokenBudget,
               agentId: recallAgentId,
+              ...(project ? { project } : {}),
             } });
             const text =
               format === "narrative" &&
@@ -137,6 +158,7 @@ export function registerMcpEndpoints(
               typeof (result as { text?: unknown }).text === "string"
                 ? (result as { text: string }).text
                 : JSON.stringify(result, null, 2);
+            recordMcpContextDelivery(sdk, "mcp_recall", text, project);
             return {
               status_code: 200,
               body: {
@@ -187,6 +209,10 @@ export function registerMcpEndpoints(
               typeof args.project === "string" && args.project.trim().length > 0
                 ? args.project.trim()
                 : undefined;
+            const saveAgentId =
+              typeof args.agentId === "string" && args.agentId.trim().length > 0
+                ? (args.agentId as string).trim()
+                : undefined;
 
             const result = await sdk.trigger({ function_id: "mem::remember", payload: {
               content: args.content,
@@ -194,6 +220,7 @@ export function registerMcpEndpoints(
               concepts,
               files,
               ...(project !== undefined && { project }),
+              ...(saveAgentId !== undefined && { agentId: saveAgentId }),
             } });
             return {
               status_code: 200,
@@ -274,19 +301,28 @@ export function registerMcpEndpoints(
             }
             const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
+            const project = asNonEmptyString(args.project);
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
                 query: args.query,
                 expandIds,
                 limit,
+                ...(project ? { project } : {}),
               },
             });
+            const text = JSON.stringify(result, null, 2);
+            recordMcpContextDelivery(
+              sdk,
+              "mcp_smart_search",
+              text,
+              project,
+            );
             return {
               status_code: 200,
               body: {
                 content: [
-                  { type: "text", text: JSON.stringify(result, null, 2) },
+                  { type: "text", text },
                 ],
               },
             };
@@ -308,6 +344,11 @@ export function registerMcpEndpoints(
               function_id: "mem::vision-search",
               payload: { queryText, queryImageRef, queryImageBase64, topK, sessionId },
             });
+            recordMcpContextDelivery(
+              sdk,
+              "mcp_vision_search",
+              JSON.stringify(result, null, 2),
+            );
             return {
               status_code: 200,
               body: {
@@ -1150,6 +1191,16 @@ export function registerMcpEndpoints(
               limit: args.limit,
             } });
             return { status_code: 200, body: { content: [{ type: "text", text: JSON.stringify(lessonRecallResult, null, 2) }] } };
+          }
+
+          case "memory_lesson_delete": {
+            if (typeof args.lessonId !== "string" || !args.lessonId.trim()) {
+              return { status_code: 400, body: { error: "lessonId is required" } };
+            }
+            const lessonDeleteResult = await sdk.trigger({ function_id: "mem::lesson-delete", payload: {
+              lessonId: args.lessonId.trim(),
+            } });
+            return { status_code: 200, body: { content: [{ type: "text", text: JSON.stringify(lessonDeleteResult, null, 2) }] } };
           }
 
           case "memory_reflect": {

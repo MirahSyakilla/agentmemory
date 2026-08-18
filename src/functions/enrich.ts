@@ -3,6 +3,7 @@ import type { Memory } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { logger } from "../logger.js";
+import { createContextReductionAccounting } from "../utils/token-estimate.js";
 
 const MAX_CONTEXT_LENGTH = 4000;
 
@@ -118,7 +119,8 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
         );
       }
 
-      let context = parts.join("\n\n");
+      const baselineContext = parts.join("\n\n");
+      let context = baselineContext;
       let truncated = false;
       if (context.length > MAX_CONTEXT_LENGTH) {
         context = context.slice(0, MAX_CONTEXT_LENGTH);
@@ -133,7 +135,14 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
         truncated,
       });
 
-      return { context, truncated };
+      return {
+        context,
+        truncated,
+        accounting: createContextReductionAccounting(
+          baselineContext,
+          context,
+        ),
+      };
     },
   );
 }

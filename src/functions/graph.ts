@@ -13,6 +13,7 @@ import {
   GRAPH_EXTRACTION_SYSTEM,
   buildGraphExtractionPrompt,
 } from "../prompts/graph-extraction.js";
+import { isGraphExtractionEnabled } from "../config.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
 
@@ -145,6 +146,7 @@ function paginateFromSnapshot(
   filterType: string | undefined,
   limit: number,
   offset: number,
+  compact = false,
 ): GraphQueryResult {
   const filteredNodes = filterType
     ? snap.topNodes.filter((n) => n.type === filterType)
@@ -157,7 +159,7 @@ function paginateFromSnapshot(
   const pageEdges = snap.topEdges.filter(
     (e) => pageIds.has(e.sourceNodeId) && pageIds.has(e.targetNodeId),
   );
-  return {
+  const result: GraphQueryResult = {
     nodes: pageNodes,
     edges: pageEdges,
     depth: 0,
@@ -167,6 +169,26 @@ function paginateFromSnapshot(
     limit,
     offset,
     fromSnapshot: true,
+  };
+  return compactGraphQueryResult(result, compact);
+}
+
+function compactGraphQueryResult(
+  result: GraphQueryResult,
+  compact: boolean,
+): GraphQueryResult {
+  if (!compact) return result;
+  return {
+    ...result,
+    nodes: result.nodes.map((node) => ({
+      ...node,
+      sourceObservationIds: [],
+      ...(node.sourceSessionIds ? { sourceSessionIds: [] } : {}),
+    })),
+    edges: result.edges.map((edge) => ({
+      ...edge,
+      sourceObservationIds: [],
+    })),
   };
 }
 
@@ -191,6 +213,45 @@ function edgeIndexKey(
   type: string,
 ): string {
   return `${sourceNodeId}|${targetNodeId}|${type}`;
+}
+
+export async function rebuildGraphIndexes(kv: StateKV): Promise<GraphSnapshot> {
+  const [nodes, edges] = await Promise.all([
+    kv.list<GraphNode>(KV.graphNodes),
+    kv.list<GraphEdge>(KV.graphEdges),
+  ]);
+  const liveNodes = nodes.filter((node) => !node.stale);
+  const liveEdges = edges.filter((edge) => !edge.stale);
+  const degree = new Map<string, number>();
+  for (const edge of liveEdges) {
+    degree.set(edge.sourceNodeId, (degree.get(edge.sourceNodeId) ?? 0) + 1);
+    degree.set(edge.targetNodeId, (degree.get(edge.targetNodeId) ?? 0) + 1);
+  }
+
+  const batchSize = 100;
+  for (let i = 0; i < liveNodes.length; i += batchSize) {
+    await Promise.all(
+      liveNodes.slice(i, i + batchSize).flatMap((node) => [
+        kv.set(KV.graphNameIndex, nameIndexKey(node.type, node.name), node.id),
+        kv.set(KV.graphNodeDegree, node.id, degree.get(node.id) ?? 0),
+      ]),
+    );
+  }
+  for (let i = 0; i < liveEdges.length; i += batchSize) {
+    await Promise.all(
+      liveEdges.slice(i, i + batchSize).map((edge) =>
+        kv.set(
+          KV.graphEdgeKey,
+          edgeIndexKey(edge.sourceNodeId, edge.targetNodeId, edge.type),
+          edge.id,
+        ),
+      ),
+    );
+  }
+
+  const snapshot = buildSnapshotFromArrays(nodes, edges);
+  await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snapshot);
+  return snapshot;
 }
 
 // Mutates `snap` to apply a +1 (or -1) degree delta for nodeId,
@@ -471,154 +532,303 @@ function parseGraphXml(
   return { nodes, edges };
 }
 
+const HEURISTIC_EDGE_WEIGHT = 0.4;
+const MAX_HEURISTIC_EDGES_PER_OBS = 12;
+
+export function extractGraphHeuristics(
+  observations: CompressedObservation[],
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const now = new Date().toISOString();
+  const nodes: GraphNode[] = [];
+  const nodeByKey = new Map<string, GraphNode>();
+  const edges: GraphEdge[] = [];
+  const edgeByPair = new Map<string, GraphEdge>();
+
+  const nodeFor = (
+    type: GraphNode["type"],
+    name: string,
+    obsId: string,
+    sessionId: string,
+  ): GraphNode | null => {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    const key = `${type} ${trimmed.toLowerCase()}`;
+    let node = nodeByKey.get(key);
+    if (!node) {
+      node = {
+        id: generateId("gn"),
+        type,
+        name: trimmed,
+        properties: {},
+        sourceObservationIds: [obsId],
+        sourceSessionIds: [sessionId],
+        createdAt: now,
+      };
+      nodeByKey.set(key, node);
+      nodes.push(node);
+    } else if (!node.sourceObservationIds.includes(obsId)) {
+      node.sourceObservationIds.push(obsId);
+      node.sourceSessionIds?.push(sessionId);
+    }
+    return node;
+  };
+
+  for (const obs of observations) {
+    let budget = MAX_HEURISTIC_EDGES_PER_OBS;
+    const link = (a: GraphNode | null, b: GraphNode | null): void => {
+      if (!a || !b || a.id === b.id) return;
+      const pair = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
+      const existing = edgeByPair.get(pair);
+      if (existing) {
+        if (!existing.sourceObservationIds.includes(obs.id)) {
+          existing.sourceObservationIds.push(obs.id);
+        }
+        return;
+      }
+      if (budget <= 0) return;
+      budget -= 1;
+      const edge: GraphEdge = {
+        id: generateId("ge"),
+        type: "related_to",
+        sourceNodeId: a.id,
+        targetNodeId: b.id,
+        weight: HEURISTIC_EDGE_WEIGHT,
+        sourceObservationIds: [obs.id],
+        createdAt: now,
+      };
+      edgeByPair.set(pair, edge);
+      edges.push(edge);
+    };
+
+    const fileNodes = (obs.files ?? []).map((f) =>
+      nodeFor("file", f, obs.id, obs.sessionId),
+    );
+    const conceptNodes = (obs.concepts ?? []).map((c) =>
+      nodeFor("concept", c, obs.id, obs.sessionId),
+    );
+
+    for (const concept of conceptNodes) {
+      for (const file of fileNodes) link(concept, file);
+    }
+    for (let i = 0; i + 1 < conceptNodes.length; i++) {
+      link(conceptNodes[i], conceptNodes[i + 1]);
+    }
+    for (let i = 0; i + 1 < fileNodes.length; i++) {
+      link(fileNodes[i], fileNodes[i + 1]);
+    }
+  }
+
+  return { nodes, edges };
+}
+
+// Shared persistence for a batch of extracted/imported nodes and edges.
+// Factored out of mem::graph-extract so structural importers (graphify)
+// reuse the exact same name-index upsert, degree bookkeeping, and snapshot
+// maintenance — which also makes re-imports idempotent: an existing
+// (type, name) resolves through the name index and merges instead of
+// duplicating.
+//
+// #814 v2: targeted name-index lookups replace the O(n) scan over
+// `kv.list<GraphNode>(KV.graphNodes)`. At 75K nodes the list payload
+// exceeds the iii heartbeat budget and the worker dies before merge can
+// complete. Each name-index entry is a single small kv.get/set pair.
+export async function persistGraphDelta(
+  kv: StateKV,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  obsIds: string[],
+): Promise<{ newNodeCount: number; newEdgeCount: number }> {
+  const snap = (await readSnapshot(kv)) ?? emptySnapshot();
+  const capturedAt = new Date().toISOString();
+  let newNodeCount = 0;
+  let newEdgeCount = 0;
+  // Merge-only batches mutate cached topNodes/topEdges entries without
+  // changing the counts; track that separately so the snapshot still persists.
+  let snapMutated = false;
+  const newEdgesForTopCheck: GraphEdge[] = [];
+  // When a freshly-minted node merges into an existing row via the name
+  // index, edges in the same batch still reference the fresh id. Remap edge
+  // endpoints to the persisted ids so edges never dangle and re-runs hit the
+  // same edge-index key instead of duplicating.
+  const idRemap = new Map<string, string>();
+
+  for (const node of nodes) {
+    const indexKey = nameIndexKey(node.type, node.name);
+    const existingId = await kv.get<string>(KV.graphNameIndex, indexKey);
+
+    let existing: GraphNode | null = null;
+    if (existingId) {
+      existing = await kv.get<GraphNode>(KV.graphNodes, existingId);
+      // #825 follow-up: name-index lookups can resolve into
+      // pre-reset rows. Drop them so extract writes a fresh
+      // node + index entry instead of silently reconnecting
+      // to a legacy orphan (which would keep the snapshot at
+      // 0 forever after a reset).
+      if (
+        existing &&
+        snap.resetAt &&
+        typeof existing.createdAt === "string" &&
+        existing.createdAt < snap.resetAt
+      ) {
+        existing = null;
+      }
+    }
+
+    if (existing) {
+      idRemap.set(node.id, existing.id);
+      const merged = mergeNode(existing, node, obsIds, capturedAt);
+      await kv.set(KV.graphNodes, existing.id, merged);
+      // Update topNodes entry if present so a stale clone isn't
+      // returned from the snapshot fast path.
+      const topIdx = snap.topNodes.findIndex((n) => n.id === existing!.id);
+      if (topIdx !== -1) {
+        snap.topNodes[topIdx] = merged;
+        snapMutated = true;
+      }
+    } else {
+      await kv.set(KV.graphNodes, node.id, node);
+      await kv.set(KV.graphNameIndex, indexKey, node.id);
+      await kv.set(KV.graphNodeDegree, node.id, 0);
+      snap.stats.totalNodes += 1;
+      snap.stats.nodesByType[node.type] =
+        (snap.stats.nodesByType[node.type] ?? 0) + 1;
+      newNodeCount += 1;
+      if (snap.topNodes.length < SNAPSHOT_TOP_NODES) {
+        // Degree 0 still beats an empty slot — sit at the tail
+        // until edges arrive and promote.
+        snap.topNodes.push(node);
+        snap.topDegrees[node.id] = 0;
+      }
+    }
+  }
+
+  for (const rawEdge of edges) {
+    const edge: GraphEdge = {
+      ...rawEdge,
+      sourceNodeId: idRemap.get(rawEdge.sourceNodeId) ?? rawEdge.sourceNodeId,
+      targetNodeId: idRemap.get(rawEdge.targetNodeId) ?? rawEdge.targetNodeId,
+    };
+    const eKey = edgeIndexKey(edge.sourceNodeId, edge.targetNodeId, edge.type);
+    const existingId = await kv.get<string>(KV.graphEdgeKey, eKey);
+
+    let existing: GraphEdge | null = null;
+    if (existingId) {
+      existing = await kv.get<GraphEdge>(KV.graphEdges, existingId);
+      // Same #825 orphan check as the node path above.
+      if (
+        existing &&
+        snap.resetAt &&
+        typeof existing.createdAt === "string" &&
+        existing.createdAt < snap.resetAt
+      ) {
+        existing = null;
+      }
+    }
+
+    if (existing) {
+      const merged = mergeEdge(existing, obsIds);
+      await kv.set(KV.graphEdges, existing.id, merged);
+      // Replace cached topEdges entry too if present.
+      const topIdx = snap.topEdges.findIndex((e) => e.id === existing!.id);
+      if (topIdx !== -1) {
+        snap.topEdges[topIdx] = merged;
+        snapMutated = true;
+      }
+    } else {
+      await kv.set(KV.graphEdges, edge.id, edge);
+      await kv.set(KV.graphEdgeKey, eKey, edge.id);
+      snap.stats.totalEdges += 1;
+      snap.stats.edgesByType[edge.type] =
+        (snap.stats.edgesByType[edge.type] ?? 0) + 1;
+      newEdgeCount += 1;
+      await applyDegreeDelta(kv, snap, edge.sourceNodeId, +1);
+      await applyDegreeDelta(kv, snap, edge.targetNodeId, +1);
+      newEdgesForTopCheck.push(edge);
+    }
+  }
+
+  // Push newly-added edges into snapshot.topEdges if both
+  // endpoints are in the top-N (post-degree-delta). Done after
+  // all degree updates so the topIds set is stable.
+  for (const edge of newEdgesForTopCheck) {
+    snapshotPushEdgeIfBothInTop(snap, edge);
+  }
+
+  if (newNodeCount > 0 || newEdgeCount > 0 || snapMutated) {
+    snap.updatedAt = capturedAt;
+    snap.dirty = false;
+    await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
+  }
+
+  return { newNodeCount, newEdgeCount };
+}
+
 export function registerGraphFunction(
   sdk: ISdk,
   kv: StateKV,
   provider: MemoryProvider,
 ): void {
-  sdk.registerFunction("mem::graph-extract", 
+  sdk.registerFunction("mem::graph-extract",
     async (data: { observations: CompressedObservation[] }) => {
       if (!data.observations || data.observations.length === 0) {
         return { success: false, error: "No observations provided" };
       }
 
-      const prompt = buildGraphExtractionPrompt(
-        data.observations.map((o) => ({
-          title: o.title,
-          narrative: o.narrative,
-          concepts: o.concepts,
-          files: o.files,
-          type: o.type,
-        })),
-      );
+      const obsIds = data.observations.map((o) => o.id);
+      const sessionIds = data.observations.map((o) => o.sessionId);
+
+      let nodes: GraphNode[] = [];
+      let edges: GraphEdge[] = [];
+      try {
+        const heuristic = extractGraphHeuristics(data.observations);
+        nodes = heuristic.nodes;
+        edges = heuristic.edges;
+      } catch (err) {
+        logger.warn("heuristic graph extraction failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      const llmEnabled =
+        isGraphExtractionEnabled() && !provider.name.includes("noop");
+      let llmError: string | undefined;
+      if (llmEnabled) {
+        const prompt = buildGraphExtractionPrompt(
+          data.observations.map((o) => ({
+            title: o.title,
+            narrative: o.narrative,
+            concepts: o.concepts,
+            files: o.files,
+            type: o.type,
+          })),
+        );
+        try {
+          const response = await provider.compress(
+            GRAPH_EXTRACTION_SYSTEM,
+            prompt,
+          );
+          const parsed = parseGraphXml(response, obsIds, sessionIds);
+          nodes = nodes.concat(parsed.nodes);
+          edges = edges.concat(parsed.edges);
+        } catch (err) {
+          llmError = err instanceof Error ? err.message : String(err);
+          logger.error("LLM graph extraction failed", { error: llmError });
+        }
+      }
+
+      if (nodes.length === 0 && edges.length === 0) {
+        return llmError
+          ? { success: false, error: llmError }
+          : { success: true, nodesAdded: 0, edgesAdded: 0 };
+      }
 
       try {
-        const response = await provider.compress(
-          GRAPH_EXTRACTION_SYSTEM,
-          prompt,
+        const { newNodeCount, newEdgeCount } = await persistGraphDelta(
+          kv,
+          nodes,
+          edges,
+          obsIds,
         );
-
-        const obsIds = data.observations.map((o) => o.id);
-        const sessionIds = data.observations.map((o) => o.sessionId);
-        const { nodes, edges } = parseGraphXml(response, obsIds, sessionIds);
-
-        // #814 v2: targeted name-index lookups replace the O(n) scan
-        // over `kv.list<GraphNode>(KV.graphNodes)`. At 75K nodes the
-        // list payload exceeds the iii heartbeat budget and the worker
-        // dies before merge can complete. Each name-index entry is a
-        // single small kv.get/set pair.
-        const snap = (await readSnapshot(kv)) ?? emptySnapshot();
-        const capturedAt = new Date().toISOString();
-        let newNodeCount = 0;
-        let newEdgeCount = 0;
-        const newEdgesForTopCheck: GraphEdge[] = [];
-
-        for (const node of nodes) {
-          const indexKey = nameIndexKey(node.type, node.name);
-          const existingId = await kv.get<string>(
-            KV.graphNameIndex,
-            indexKey,
-          );
-
-          let existing: GraphNode | null = null;
-          if (existingId) {
-            existing = await kv.get<GraphNode>(KV.graphNodes, existingId);
-            // #825 follow-up: name-index lookups can resolve into
-            // pre-reset rows. Drop them so extract writes a fresh
-            // node + index entry instead of silently reconnecting
-            // to a legacy orphan (which would keep the snapshot at
-            // 0 forever after a reset).
-            if (
-              existing &&
-              snap.resetAt &&
-              typeof existing.createdAt === "string" &&
-              existing.createdAt < snap.resetAt
-            ) {
-              existing = null;
-            }
-          }
-
-          if (existing) {
-            const merged = mergeNode(existing, node, obsIds, capturedAt);
-            await kv.set(KV.graphNodes, existing.id, merged);
-            // Update topNodes entry if present so a stale clone isn't
-            // returned from the snapshot fast path.
-            const topIdx = snap.topNodes.findIndex(
-              (n) => n.id === existing!.id,
-            );
-            if (topIdx !== -1) snap.topNodes[topIdx] = merged;
-          } else {
-            await kv.set(KV.graphNodes, node.id, node);
-            await kv.set(KV.graphNameIndex, indexKey, node.id);
-            await kv.set(KV.graphNodeDegree, node.id, 0);
-            snap.stats.totalNodes += 1;
-            snap.stats.nodesByType[node.type] =
-              (snap.stats.nodesByType[node.type] ?? 0) + 1;
-            newNodeCount += 1;
-            if (snap.topNodes.length < SNAPSHOT_TOP_NODES) {
-              // Degree 0 still beats an empty slot — sit at the tail
-              // until edges arrive and promote.
-              snap.topNodes.push(node);
-              snap.topDegrees[node.id] = 0;
-            }
-          }
-        }
-
-        for (const edge of edges) {
-          const eKey = edgeIndexKey(
-            edge.sourceNodeId,
-            edge.targetNodeId,
-            edge.type,
-          );
-          const existingId = await kv.get<string>(KV.graphEdgeKey, eKey);
-
-          let existing: GraphEdge | null = null;
-          if (existingId) {
-            existing = await kv.get<GraphEdge>(KV.graphEdges, existingId);
-            // Same #825 orphan check as the node path above.
-            if (
-              existing &&
-              snap.resetAt &&
-              typeof existing.createdAt === "string" &&
-              existing.createdAt < snap.resetAt
-            ) {
-              existing = null;
-            }
-          }
-
-          if (existing) {
-            const merged = mergeEdge(existing, obsIds);
-            await kv.set(KV.graphEdges, existing.id, merged);
-            // Replace cached topEdges entry too if present.
-            const topIdx = snap.topEdges.findIndex(
-              (e) => e.id === existing!.id,
-            );
-            if (topIdx !== -1) snap.topEdges[topIdx] = merged;
-          } else {
-            await kv.set(KV.graphEdges, edge.id, edge);
-            await kv.set(KV.graphEdgeKey, eKey, edge.id);
-            snap.stats.totalEdges += 1;
-            snap.stats.edgesByType[edge.type] =
-              (snap.stats.edgesByType[edge.type] ?? 0) + 1;
-            newEdgeCount += 1;
-            await applyDegreeDelta(kv, snap, edge.sourceNodeId, +1);
-            await applyDegreeDelta(kv, snap, edge.targetNodeId, +1);
-            newEdgesForTopCheck.push(edge);
-          }
-        }
-
-        // Push newly-added edges into snapshot.topEdges if both
-        // endpoints are in the top-N (post-degree-delta). Done after
-        // all degree updates so the topIds set is stable.
-        for (const edge of newEdgesForTopCheck) {
-          snapshotPushEdgeIfBothInTop(snap, edge);
-        }
-
-        if (newNodeCount > 0 || newEdgeCount > 0) {
-          snap.updatedAt = capturedAt;
-          snap.dirty = false;
-          await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);
-        }
 
         await recordAudit(kv, "observe", "mem::graph-extract", obsIds, {
           nodesExtracted: nodes.length,
@@ -630,6 +840,7 @@ export function registerGraphFunction(
           edges: edges.length,
           newNodes: newNodeCount,
           newEdges: newEdgeCount,
+          llm: llmEnabled && !llmError,
         });
         return {
           success: true,
@@ -658,6 +869,7 @@ export function registerGraphFunction(
       query?: string;
       limit?: number;
       offset?: number;
+      compact?: boolean;
     }): Promise<GraphQueryResult> => {
       const maxDepth = Math.min(data.maxDepth || 3, 5);
       const { limit, offset } = resolvePagination(data.limit, data.offset);
@@ -673,7 +885,13 @@ export function registerGraphFunction(
       if (noWalk) {
         const snap = await readSnapshot(kv);
         if (snap && snap.stats.totalNodes > 0) {
-          return paginateFromSnapshot(snap, data.nodeType, limit, offset);
+          return paginateFromSnapshot(
+            snap,
+            data.nodeType,
+            limit,
+            offset,
+            data.compact === true,
+          );
         }
         return {
           nodes: [],
@@ -718,7 +936,13 @@ export function registerGraphFunction(
         const snap = await readSnapshot(kv);
         if (snap) {
           return {
-            ...paginateFromSnapshot(snap, data.nodeType, limit, offset),
+            ...paginateFromSnapshot(
+              snap,
+              data.nodeType,
+              limit,
+              offset,
+              data.compact === true,
+            ),
             warning:
               "Live graph enumeration exceeded budget. Query / " +
               "startNodeId paths degrade on >25K-node corpora until a " +
@@ -749,7 +973,10 @@ export function registerGraphFunction(
               (v) => typeof v === "string" && v.toLowerCase().includes(lower),
             ),
         );
-        return paginate(matchingNodes, allEdges, 0, limit, offset);
+        return compactGraphQueryResult(
+          paginate(matchingNodes, allEdges, 0, limit, offset),
+          data.compact === true,
+        );
       }
 
       if (data.startNodeId) {
@@ -791,7 +1018,10 @@ export function registerGraphFunction(
           }
         }
 
-        return paginate(resultNodes, resultEdges, maxDepth, limit, offset);
+        return compactGraphQueryResult(
+          paginate(resultNodes, resultEdges, maxDepth, limit, offset),
+          data.compact === true,
+        );
       }
 
       // Unreachable — noWalk branch handles the rest.

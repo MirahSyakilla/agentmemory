@@ -141,4 +141,35 @@ describe("observe implicit session create (#638)", () => {
     expect(session.observationCount).toBe(8);
     expect(session.updatedAt).toBeTruthy();
   });
+
+  it("reopens a completed session when a follow-up prompt arrives", async () => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+
+    await kv.set("mem:sessions", "ses_resend", {
+      id: "ses_resend",
+      project: "/project",
+      cwd: "/project",
+      startedAt: "2026-07-18T00:00:00.000Z",
+      endedAt: "2026-07-18T00:05:00.000Z",
+      status: "completed",
+      observationCount: 7,
+    });
+
+    await sdk.trigger("mem::observe", {
+      sessionId: "ses_resend",
+      project: "/project",
+      cwd: "/project",
+      hookType: "prompt_submit",
+      timestamp: "2026-07-18T00:06:00.000Z",
+      data: { prompt: "Use the revised request instead." },
+    });
+
+    const session = kv.store.get("mem:sessions")!.get("ses_resend") as Record<string, unknown>;
+    expect(session.status).toBe("active");
+    expect(session.endedAt).toBeUndefined();
+    expect(session.observationCount).toBe(8);
+  });
 });

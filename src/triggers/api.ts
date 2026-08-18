@@ -1,7 +1,15 @@
 import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
-import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
+import type {
+  Session,
+  CompressedObservation,
+  HookPayload,
+  CommitLink,
+  SessionSummary,
+  ContextReductionAccounting,
+} from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV } from "../state/schema.js";
+import { checkPayloadFrameSize } from "../state/frame-guard.js";
 import { StateKV } from "../state/kv.js";
 import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
@@ -14,6 +22,10 @@ import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
 import {
+  isContextReductionAccounting,
+  isContextReductionSource,
+} from "../functions/context-reduction.js";
+import {
   isGraphExtractionEnabled,
   isConsolidationEnabled,
   isAutoCompressEnabled,
@@ -22,6 +34,7 @@ import {
   detectLlmProviderKind,
   getAgentId,
   isAgentScopeIsolated,
+  loadConfig,
 } from "../config.js";
 
 type Response = {
@@ -180,10 +193,23 @@ export function registerApiTriggers(
     },
   );
 
+  // Shared instance metadata for livez and health so the two never
+  // drift. streamsPort lets the viewer resolve its stream WebSocket
+  // target from the server instead of port arithmetic, which broke
+  // whenever the viewer bound a fallback port. Config is boot-static,
+  // so read it once instead of rebuilding the merged env per request.
+  const bootStreamsPort = loadConfig().streamsPort;
+  const instanceInfo = () => ({
+    service: "agentmemory",
+    viewerPort: getBoundViewerPort(),
+    viewerSkipped: getViewerSkipped(),
+    streamsPort: bootStreamsPort,
+  });
+
   sdk.registerFunction("api::liveness",
     async (): Promise<Response> => ({
       status_code: 200,
-      body: { status: "ok", service: "agentmemory", viewerPort: getBoundViewerPort(), viewerSkipped: getViewerSkipped() },
+      body: { status: "ok", ...instanceInfo() },
     }),
   );
   sdk.registerTrigger({
@@ -239,7 +265,7 @@ export function registerApiTriggers(
           default: false,
           affects: ["Hooks"],
           needsLlm: false,
-          description: "Hooks write recalled context into Claude Code's conversation. OFF captures in the background without injecting.",
+          description: "Supported host hooks can add recalled context to the conversation, including another SessionStart block after a resume or reload. OFF keeps background capture and MCP recall active without injecting.",
           enableHow: "Set AGENTMEMORY_INJECT_CONTEXT=true and restart.",
           docsHref: "https://github.com/rohitg00/agentmemory/issues/143",
         },
@@ -284,8 +310,7 @@ export function registerApiTriggers(
           health: health || null,
           functionMetrics,
           circuitBreaker,
-          viewerPort: getBoundViewerPort(),
-          viewerSkipped: getViewerSkipped(),
+          ...instanceInfo(),
         },
       };
     },
@@ -354,7 +379,12 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::context",
     async (
-      req: ApiRequest<{ sessionId: string; project: string; budget?: number }>,
+      req: ApiRequest<{
+        sessionId: string;
+        project: string;
+        budget?: number;
+        agentId?: string;
+      }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const sessionId = asNonEmptyString(body.sessionId);
@@ -372,11 +402,31 @@ export function registerApiTriggers(
           body: { error: "budget must be a positive integer" },
         };
       }
-      const payload: { sessionId: string; project: string; budget?: number } = {
+      // Propagate agentId so mem::context applies the same cross-agent
+      // isolation filter as mem::search. Honors body.agentId, ?agentId=,
+      // or the worker's AGENT_ID fallback under AGENTMEMORY_AGENT_SCOPE=isolated.
+      const queryAgentId =
+        typeof (req as { query_params?: Record<string, string> })
+          .query_params?.["agentId"] === "string"
+          ? (req as { query_params: Record<string, string> })
+              .query_params["agentId"]
+          : undefined;
+      const bodyAgentId =
+        typeof body.agentId === "string" && body.agentId.trim().length > 0
+          ? (body.agentId as string).trim()
+          : undefined;
+      const payload: {
+        sessionId: string;
+        project: string;
+        budget?: number;
+        agentId?: string;
+      } = {
         sessionId,
         project,
       };
       if (budget !== undefined) payload.budget = budget;
+      const agentId = bodyAgentId ?? queryAgentId;
+      if (agentId !== undefined) payload.agentId = agentId;
       const result = await sdk.trigger({ function_id: "mem::context", payload });
       return { status_code: 200, body: result };
     },
@@ -387,6 +437,74 @@ export function registerApiTriggers(
     config: {
       api_path: "/agentmemory/context",
       http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction(
+    "api::context-reduction-record",
+    async (
+      req: ApiRequest<{
+        accounting: ContextReductionAccounting;
+        source: string;
+        sessionId?: string;
+        project?: string;
+      }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!isContextReductionAccounting(body.accounting)) {
+        return {
+          status_code: 400,
+          body: { error: "valid accounting is required" },
+        };
+      }
+      if (!isContextReductionSource(body.source)) {
+        return {
+          status_code: 400,
+          body: { error: "valid source is required" },
+        };
+      }
+      const sessionId = asNonEmptyString(body.sessionId);
+      const project = asNonEmptyString(body.project);
+      const result = await sdk.trigger({
+        function_id: "mem::context-reduction-record",
+        payload: {
+          accounting: body.accounting,
+          source: body.source,
+          ...(sessionId ? { sessionId } : {}),
+          ...(project ? { project } : {}),
+        },
+      });
+      return { status_code: 201, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::context-reduction-record",
+    config: {
+      api_path: "/agentmemory/context-reduction/events",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction(
+    "api::context-reduction-stats",
+    async (req: ApiRequest): Promise<Response> => {
+      const project = asNonEmptyString(req.query_params?.["project"]);
+      const result = await sdk.trigger({
+        function_id: "mem::context-reduction-stats",
+        payload: project ? { project } : {},
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::context-reduction-stats",
+    config: {
+      api_path: "/agentmemory/context-reduction/stats",
+      http_method: "GET",
       middleware_function_ids: ["middleware::api-auth"],
     },
   });
@@ -611,26 +729,57 @@ export function registerApiTriggers(
         typeof body.agentId === "string" && body.agentId.trim().length > 0
           ? body.agentId.trim().slice(0, 128)
           : undefined;
-      const agentId = requestAgentId ?? getAgentId();
-      const session: Session = {
-        id: sessionId,
-        project,
-        cwd,
-        startedAt: new Date().toISOString(),
-        status: "active",
-        observationCount: 0,
-        ...(title ? { summary: title.slice(0, 200) } : {}),
-        ...(title ? { firstPrompt: title.slice(0, 200) } : {}),
-        ...(agentId ? { agentId } : {}),
-      };
+      const existingSession = await kv.get<Session>(KV.sessions, sessionId);
+      const agentId =
+        requestAgentId ??
+        (existingSession ? existingSession.agentId : getAgentId());
+      let session: Session;
+      if (existingSession) {
+        const resumedSession = { ...existingSession };
+        delete resumedSession.endedAt;
+        session = {
+          ...resumedSession,
+          id: sessionId,
+          project,
+          cwd,
+          status: "active",
+          observationCount: existingSession.observationCount ?? 0,
+          ...(title ? { summary: title.slice(0, 200) } : {}),
+          ...(title && !existingSession.firstPrompt
+            ? { firstPrompt: title.slice(0, 200) }
+            : {}),
+          ...(agentId ? { agentId } : {}),
+        };
+      } else {
+        session = {
+          id: sessionId,
+          project,
+          cwd,
+          startedAt: new Date().toISOString(),
+          status: "active",
+          observationCount: 0,
+          ...(title ? { summary: title.slice(0, 200) } : {}),
+          ...(title ? { firstPrompt: title.slice(0, 200) } : {}),
+          ...(agentId ? { agentId } : {}),
+        };
+      }
       await kv.set(KV.sessions, sessionId, session);
       const contextResult = await sdk.trigger<
-        { sessionId: string; project: string },
-        { context: string }
-      >({ function_id: "mem::context", payload: { sessionId, project } });
+        { sessionId: string; project: string; agentId?: string },
+        { context: string; accounting?: ContextReductionAccounting }
+      >({
+        function_id: "mem::context",
+        payload: { sessionId, project, ...(agentId ? { agentId } : {}) },
+      });
       return {
         status_code: 200,
-        body: { session, context: contextResult.context },
+        body: {
+          session,
+          context: contextResult.context,
+          ...(contextResult.accounting
+            ? { accounting: contextResult.accounting }
+            : {}),
+        },
       };
     },
   );
@@ -639,6 +788,72 @@ export function registerApiTriggers(
     function_id: "api::session::start",
     config: {
       api_path: "/agentmemory/session/start",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction(
+    "api::session::turn-end",
+    async (req: ApiRequest): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const sessionId = asNonEmptyString(body.sessionId);
+      if (!sessionId) {
+        return {
+          status_code: 400,
+          body: { error: "sessionId is required and must be a non-empty string" },
+        };
+      }
+
+      const existingSession = await kv.get<Session>(KV.sessions, sessionId);
+      const project =
+        asNonEmptyString(body.project) ?? existingSession?.project;
+      const cwd = asNonEmptyString(body.cwd) ?? existingSession?.cwd;
+      if (!project || !cwd) {
+        return {
+          status_code: 400,
+          body: { error: "project and cwd are required for an unknown session" },
+        };
+      }
+
+      const turnId = asNonEmptyString(body.turnId);
+      const model = asNonEmptyString(body.model);
+      const lastAssistantMessage = asNonEmptyString(body.lastAssistantMessage);
+      const reason = asNonEmptyString(body.reason);
+      const observation = await sdk.trigger({
+        function_id: "mem::observe",
+        payload: {
+          hookType: "stop",
+          sessionId,
+          project,
+          cwd,
+          timestamp:
+            asNonEmptyString(body.timestamp) ?? new Date().toISOString(),
+          data: {
+            ...(turnId ? { turn_id: turnId } : {}),
+            ...(model ? { model } : {}),
+            ...(lastAssistantMessage
+              ? { last_assistant_message: lastAssistantMessage.slice(0, 4000) }
+              : {}),
+            ...(typeof body.stopHookActive === "boolean"
+              ? { stop_hook_active: body.stopHookActive }
+              : {}),
+            ...(reason ? { reason: reason.slice(0, 1000) } : {}),
+          },
+        } satisfies HookPayload,
+      });
+
+      return {
+        status_code: 200,
+        body: { success: true, sessionId, observation },
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::session::turn-end",
+    config: {
+      api_path: "/agentmemory/session/turn-end",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
@@ -659,11 +874,18 @@ export function registerApiTriggers(
       ]);
       // Fan out session-stopped lifecycle (non-blocking).
       try {
-        sdk.trigger({
-          function_id: "event::session::stopped",
-          payload: { sessionId },
-          action: TriggerAction.Void(),
-        });
+        void sdk
+          .trigger({
+            function_id: "event::session::stopped",
+            payload: { sessionId },
+            action: TriggerAction.Void(),
+          })
+          .catch((err) => {
+            logger.warn("event::session::stopped trigger failed", {
+              sessionId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
       } catch (err) {
         logger.warn("event::session::stopped trigger failed", {
           sessionId,
@@ -853,11 +1075,21 @@ export function registerApiTriggers(
       const filtered = filterAgentId
         ? sessions.filter((s) => s.agentId === filterAgentId)
         : sessions;
-      const summaries = await Promise.all(
-        filtered.map((s) =>
-          kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
-        ),
-      );
+      // Bounded fan-out: each kv.get is a full engine invocation, so
+      // Promise.all over hundreds of sessions saturates the invocation
+      // pool. Batch in chunks of 10 (parallel within a chunk, sequential
+      // across chunks); the summaries array stays index-aligned with
+      // `filtered`.
+      const summaries: Array<SessionSummary | null> = [];
+      for (let batch = 0; batch < filtered.length; batch += 10) {
+        const chunk = filtered.slice(batch, batch + 10);
+        const results = await Promise.all(
+          chunk.map((s) =>
+            kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
+          ),
+        );
+        summaries.push(...results);
+      }
       const withSummary = filtered.map((s, i) =>
         summaries[i] ? { ...s, summary: summaries[i] } : s,
       );
@@ -1028,6 +1260,7 @@ export function registerApiTriggers(
         ttlDays?: number;
         sourceObservationIds?: string[];
         project?: string;
+        agentId?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1055,6 +1288,9 @@ export function registerApiTriggers(
           ...(req.body.ttlDays !== undefined && { ttlDays: req.body.ttlDays }),
           ...(req.body.sourceObservationIds !== undefined && { sourceObservationIds: req.body.sourceObservationIds }),
           ...(req.body.project !== undefined && { project: req.body.project }),
+          ...(typeof req.body.agentId === "string" && req.body.agentId.trim()
+            ? { agentId: req.body.agentId.trim() }
+            : {}),
         },
       });
       return { status_code: 201, body: result };
@@ -1497,6 +1733,7 @@ export function registerApiTriggers(
         query?: string;
         limit?: number;
         offset?: number;
+        compact?: boolean;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1510,6 +1747,7 @@ export function registerApiTriggers(
         query: req.body?.query,
         limit: req.body?.limit,
         offset: req.body?.offset,
+        compact: req.body?.compact,
       };
       try {
         const result = await sdk.trigger({ function_id: "mem::graph-query", payload });
@@ -1684,6 +1922,43 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::graph-build",
     config: { api_path: "/agentmemory/graph/build", http_method: "POST" },
+  });
+
+  // Import graphify's structural graph (graphify-out/graph.json) into the
+  // memory graph. Deterministic, no LLM call; idempotent via the graph
+  // name-index upsert.
+  sdk.registerFunction("api::graph-import-graphify",
+    async (req: ApiRequest<{ path?: string; cwd?: string }>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const { path, cwd } = req.body ?? {};
+      if (
+        (path !== undefined && typeof path !== "string") ||
+        (cwd !== undefined && typeof cwd !== "string")
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "path and cwd must be strings when provided" },
+        };
+      }
+      try {
+        const result = await sdk.trigger({
+          function_id: "mem::graph::import-graphify",
+          payload: {
+            ...(path !== undefined ? { path } : {}),
+            ...(cwd !== undefined ? { cwd } : {}),
+          },
+        });
+        return { status_code: 200, body: result };
+      } catch {
+        return graphDisabledResponse();
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::graph-import-graphify",
+    config: { api_path: "/agentmemory/graph/import-graphify", http_method: "POST" },
   });
 
   sdk.registerFunction("api::consolidate-pipeline",
@@ -2772,9 +3047,10 @@ export function registerApiTriggers(
       const sinceTime = since ? new Date(since).getTime() : 0;
       const df = <T>(items: T[], field: "updatedAt" | "createdAt") =>
         items.filter((i) => new Date((i as Record<string, unknown>)[field] as string).getTime() > sinceTime);
-      const memories = await kv.list<import("../types.js").Memory>(KV.memories);
+      let memories = await kv.list<import("../types.js").Memory>(KV.memories);
       let actions = await kv.list<import("../types.js").Action>(KV.actions);
       if (project) {
+        memories = memories.filter((m) => m.project === project);
         actions = actions.filter((a) => a.project === project);
       }
       const body: Record<string, unknown> = {
@@ -2794,6 +3070,14 @@ export function registerApiTriggers(
           (n) => new Date(n.updatedAt || n.createdAt).getTime() > sinceTime,
         );
         body.graphEdges = df(graphEdges, "createdAt");
+      }
+      // Fail an over-frame export with 413 instead of dropping the worker.
+      const oversized = checkPayloadFrameSize(
+        body,
+        "use ?since to fetch only changes after a timestamp, or ?project to scope the export",
+      );
+      if (oversized) {
+        return { status_code: 413, body: oversized };
       }
       return { status_code: 200, body };
     },
@@ -3202,6 +3486,21 @@ export function registerApiTriggers(
     return { status_code: 200, body: result };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::lesson-strengthen", config: { api_path: "/agentmemory/lessons/strengthen", http_method: "POST" } });
+
+  sdk.registerFunction("api::lesson-delete",  async (req: ApiRequest) => {
+    const denied = checkAuth(req, secret);
+    if (denied) return denied;
+    const body = req.body as Record<string, unknown>;
+    const lessonId = typeof body?.lessonId === "string" ? body.lessonId.trim() : "";
+    if (!lessonId) return { status_code: 400, body: { error: "lessonId is required" } };
+    const result = await sdk.trigger({ function_id: "mem::lesson-delete", payload: { lessonId } });
+    const resp = result as { success?: boolean; error?: string };
+    if (resp?.success === false && resp.error === "lesson not found") {
+      return { status_code: 404, body: { error: "lesson not found" } };
+    }
+    return { status_code: 200, body: result };
+  });
+  sdk.registerTrigger({ type: "http", function_id: "api::lesson-delete", config: { api_path: "/agentmemory/lessons/delete", http_method: "POST" } });
 
   sdk.registerFunction("api::obsidian-export", async (req: ApiRequest) => {
     const denied = checkAuth(req, secret);
