@@ -8,7 +8,8 @@ This repository is a maintained fork of [rohitg00/agentmemory](https://github.co
 
 - Captures prompts, tool use, file work, session milestones, and explicit memory saves.
 - Searches memories through lexical, vector, and graph signals.
-- Serves 54 MCP tools, REST endpoints on `127.0.0.1:3111`, and a viewer on `127.0.0.1:3113`.
+- Serves 54 MCP tools. Its full MCP surface is 54 tools, 6 resources, 3 prompts, and 17 skills.
+- Exposes 133 endpoints on port `3111`, with the viewer on `127.0.0.1:3113`.
 - Supports Claude Code, Codex, OpenCode, Cursor, Copilot CLI, pi, Devin, Droid, Antigravity, and MCP-capable clients.
 - Keeps session history, lessons, relations, audit records, graph data, exports, and backups separate from the agent's working repository.
 
