@@ -223,9 +223,25 @@ describe("viewer session rendering", () => {
     expect(getElement("view-dashboard").innerHTML).toContain("Unknown session");
   });
 
-  it("estimates dashboard token savings from active sessions only", () => {
+  it("keeps the existing dashboard visible while auto-refresh loads", async () => {
     const { sandbox, getElement } = loadViewerSandbox();
-    sandbox.window.location.search = "?tokenBudget=2000";
+    sandbox.state.dashboard.loaded = true;
+    const dashboard = getElement("view-dashboard");
+    dashboard.innerHTML = "existing dashboard";
+    let release: ((value: unknown) => void) | undefined;
+    const pending = new Promise((resolve) => { release = resolve; });
+    sandbox.fetch = () => pending;
+
+    const refresh = sandbox.loadDashboard();
+    expect(dashboard.innerHTML).toBe("existing dashboard");
+
+    release!({ ok: true, json: async () => ({}) });
+    await refresh;
+    expect(dashboard.innerHTML).not.toContain("Loading dashboard...");
+  });
+
+  it("shows injection state, historical automatic context, and MCP delivery separately", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
     sandbox.state.dashboard = {
       loaded: true,
       health: { status: "healthy", health: {} },
@@ -239,14 +255,161 @@ describe("viewer session rendering", () => {
       recentAudit: [],
       lessons: [],
       crystals: [],
+      contextReduction: {
+        measuredEvents: 9,
+        estimator: "chars_div_3_v1",
+        bySource: {
+          session_start: { measuredEvents: 5, returnedTokens: 9533 },
+          pre_compact: { measuredEvents: 2, returnedTokens: 2853 },
+          mcp_recall: { measuredEvents: 1, returnedTokens: 700 },
+          mcp_smart_search: { measuredEvents: 1, returnedTokens: 200 },
+        },
+        retrievalSavings: {
+          corpus: {
+            textChars: 300000,
+            textTokens: 100000,
+            imageCount: 2,
+            imageTokens: 1200,
+            unknownImageCount: 0,
+            totalTokens: 101200,
+            observationCount: 400,
+            memoryCount: 50,
+            lessonCount: 20,
+            exceedsContextWindow: false,
+          },
+          delivery: { events: 2, textTokensDelivered: 900, imageTokensDelivered: 0 },
+          pricing: { contextWindowTokens: 1050000 },
+          perFullCorpusLoad: {
+            cachedReadUsd: 0.0506,
+            uncachedInputUsd: 0.506,
+            cacheWriteUsd: 0.6325,
+          },
+          totalAcrossMcpCalls: {
+            estimatedTokensAvoided: 201500,
+            cachedReadUsd: 0.1008,
+            uncachedInputUsd: 1.0075,
+            cacheWriteUsd: 1.2594,
+          },
+        },
+      },
+      configFlags: {
+        flags: [{ key: "AGENTMEMORY_INJECT_CONTEXT", enabled: false }],
+      },
     };
 
     sandbox.renderDashboard();
 
     const html = getElement("view-dashboard").innerHTML;
-    expect(html).toContain("Token Savings");
-    expect(html).toContain(">17%<");
-    expect(html).toContain("~400 tokens");
+    expect(html).toContain("Automatic Injection");
+    expect(html).toContain(">OFF<");
+    expect(html).toContain("Capture, summaries, embeddings, and MCP recall remain active");
+    expect(html).toContain("Historical: ~12,386 tokens added across 7 emissions");
+    expect(html).toContain("On-Demand Recall");
+    expect(html).toContain(">~900<");
+    expect(html).toContain("across 2 explicit MCP calls");
+    expect(html).toContain("Est. Retrieval Savings");
+    expect(html).toContain("Full Corpus Equivalent");
+    expect(html).toContain("Counterfactual estimate, not measured Codex/API billing");
+    expect(html).not.toContain("Est. Context Reduction");
+  });
+
+  it("uses million and billion units for large retrieval savings", () => {
+    const { sandbox } = loadViewerSandbox();
+
+    expect(sandbox.formatUsdRange(90_000, 1_124_000)).toBe("$90K–$1.12M");
+    expect(sandbox.formatUsd(2_250_000)).toBe("$2.25M");
+    expect(sandbox.formatCompactNumber(89_944_000_000)).toBe("89.944B");
+  });
+
+  it("separates graph edges from memory relations and reports consolidation outcomes", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessions: [],
+      memories: [],
+      graphStats: { totalNodes: 10, totalEdges: 7886 },
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+      semantic: [],
+      procedural: [],
+      relations: [],
+      contextReduction: null,
+      configFlags: { flags: [] },
+      lastConsolidation: {
+        timestamp: "2026-08-17T12:00:00.000Z",
+        details: {
+          results: {
+            semantic: { newFacts: 2 },
+            procedural: { skipped: true, reason: "fewer than 2 recurring patterns" },
+          },
+        },
+      },
+    };
+
+    sandbox.renderDashboard();
+
+    const html = getElement("view-dashboard").innerHTML;
+    expect(html).toContain("Graph edges");
+    expect(html).toContain(">7886<");
+    expect(html).toContain("Memory relations");
+    expect(html).toContain("2 new facts");
+    expect(html).toContain("fewer than 2 recurring patterns");
+    expect(html).toContain("Last pipeline:");
+  });
+
+  it("warns that enabled SessionStart injection can repeat on resume or reload", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessions: [],
+      memories: [],
+      graphStats: null,
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+      contextReduction: { measuredEvents: 0, bySource: {} },
+      configFlags: {
+        flags: [{ key: "AGENTMEMORY_INJECT_CONTEXT", enabled: true }],
+      },
+    };
+
+    sandbox.renderDashboard();
+
+    const html = getElement("view-dashboard").innerHTML;
+    expect(html).toContain(">ON<");
+    expect(html).toContain("Supported hooks can add recalled memory automatically");
+    expect(html).toContain("SessionStart may run again on resume or reload");
+  });
+
+  it("renders zero on-demand delivery without claiming token savings", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessions: [],
+      memories: [],
+      graphStats: null,
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+      contextReduction: { measuredEvents: 0, bySource: {} },
+      configFlags: {
+        flags: [{ key: "AGENTMEMORY_INJECT_CONTEXT", enabled: false }],
+      },
+    };
+
+    sandbox.renderDashboard();
+
+    const html = getElement("view-dashboard").innerHTML;
+    expect(html).toContain("Automatic Injection");
+    expect(html).toContain("On-Demand Recall");
+    expect(html).toContain(">~0<");
+    expect(html).toContain("across 0 explicit MCP calls");
+    expect(html).not.toContain("Historical:");
+    expect(html).not.toContain("token savings");
   });
 
   it("debounces dashboard websocket refreshes without blanking rendered content", () => {
