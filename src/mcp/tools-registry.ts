@@ -36,6 +36,10 @@ export const CORE_TOOLS: McpToolDef[] = [
           type: "string",
           description: "Stable canonical project identifier to filter results",
         },
+        agentId: {
+          type: "string",
+          description: "Agent identity to filter results; use * for an explicit cross-agent read",
+        },
       },
       required: ["query"],
     },
@@ -93,6 +97,25 @@ export const CORE_TOOLS: McpToolDef[] = [
             "Agent identity to scope this memory to. When set, agent-scoped recall " +
             "and search only surface it for the same agentId. Omit for shared memory.",
         },
+        layer: {
+          type: "string",
+          description: "Knowledge layer: knowledge, experience, decision, hypothesis, artifact, or procedure",
+        },
+        epistemicState: {
+          type: "string",
+          description: "Epistemic state: hypothesis, observed, verified, disproven, superseded, or uncertain",
+        },
+        temporal: {
+          type: "object",
+          description: "Optional observedAt, validFrom, validUntil, verifiedAt, and sourceRevision metadata",
+        },
+        authority: {
+          type: "object",
+          description: "Optional authority source, score, and rationale; agent authority is recorded by default",
+        },
+        evidenceIds: { type: "array", description: "Linked evidence IDs" },
+        artifactIds: { type: "array", description: "Linked artifact IDs" },
+        experimentIds: { type: "array", description: "Linked experiment IDs" },
       },
       required: ["content"],
     },
@@ -146,6 +169,10 @@ export const CORE_TOOLS: McpToolDef[] = [
         project: {
           type: "string",
           description: "Stable canonical project identifier to filter results",
+        },
+        agentId: {
+          type: "string",
+          description: "Agent identity to filter results; use * for an explicit cross-agent read",
         },
       },
       required: ["query"],
@@ -968,6 +995,353 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
 ];
 
+export const V093_EVIDENCE_TOOLS: McpToolDef[] = [
+  {
+    name: "memory_retrieval_plan",
+    description:
+      "Use to retrieve task context through a deterministic plan across memory, graph, temporal, experiment, artifact, evidence, and negative-memory sources. Returns a tiered context budget, conflict warnings, source coverage, and opaque expansion handles.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Task or retrieval query" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope; use * only for an explicit cross-agent read" },
+        limit: { type: "number", description: "Maximum ranked candidates (default 20, max 100)" },
+        tokenBudget: { type: "number", description: "Hard total token ceiling for returned context" },
+        budgets: { type: "object", description: "Optional direct, supporting, historical, provenance, and total token budgets" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "memory_retrieval_expand",
+    description:
+      "Use to progressively disclose the full content behind an opaque handle returned by memory_retrieval_plan. The identical project and agent scope is required and handles expire quickly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handle: { type: "string", description: "Opaque retrieval expansion handle" },
+        project: { type: "string", description: "Project scope used for the plan" },
+        agentId: { type: "string", description: "Agent scope used for the plan" },
+        tokenBudget: { type: "number", description: "Maximum tokens to disclose" },
+      },
+      required: ["handle"],
+    },
+  },
+  {
+    name: "memory_evidence_save",
+    description:
+      "Use to persist typed, attributable evidence such as a file range, log excerpt, commit, URL, tool output, or verification result. Provenance with channel and capturedAt is required.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", description: "Evidence kind, such as log, file, commit, URL, tool_output, or experiment" },
+        content: { type: "string", description: "Captured evidence content or summary" },
+        claim: { type: "string", description: "Claim supported or refuted by this evidence" },
+        locator: { type: "string", description: "File/range, log range, commit, URL, or other precise location" },
+        provenance: { type: "object", description: "Required provenance: channel, capturedAt, and optional detail/source identifiers" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Owning agent identity" },
+        artifactId: { type: "string", description: "Linked artifact ID" },
+        experimentId: { type: "string", description: "Linked experiment ID" },
+        idempotencyKey: { type: "string", description: "Durable request key when PostgreSQL metadata storage is enabled" },
+      },
+      required: ["kind", "provenance"],
+    },
+  },
+  {
+    name: "memory_evidence_search",
+    description:
+      "Use to search typed evidence by content, claim, locator, source, artifact, or experiment within an optional project and agent scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Evidence query" },
+        kind: { type: "string", description: "Optional evidence kind filter" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+        limit: { type: "number", description: "Maximum results" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "memory_evidence_get",
+    description:
+      "Use to fetch one typed evidence record by ID within its project and agent scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Evidence ID" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "memory_evidence_verify",
+    description:
+      "Use to persist how and when a verifier checked an evidence record, including the verification method and optional result.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Evidence ID" },
+        verifier: { type: "string", description: "Person, agent, or tool that performed verification" },
+        verificationMethod: { type: "string", description: "Verification method" },
+        result: { type: "object", description: "Optional structured verification result" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+      required: ["id", "verifier", "verificationMethod"],
+    },
+  },
+  {
+    name: "memory_artifact_save",
+    description:
+      "Use to persist an artifact reference with its path or URI, digest, media type, linked evidence, experiment IDs, and provenance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Artifact name" },
+        kind: { type: "string", description: "Artifact kind, such as build, log, report, binary, or document" },
+        path: { type: "string", description: "Local artifact path" },
+        uri: { type: "string", description: "Artifact URI" },
+        digest: { type: "string", description: "Content digest" },
+        provenance: { type: "object", description: "Required provenance record" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Owning agent identity" },
+        idempotencyKey: { type: "string", description: "Durable request key when PostgreSQL metadata storage is enabled" },
+      },
+      required: ["name", "provenance"],
+    },
+  },
+  {
+    name: "memory_artifact_search",
+    description:
+      "Use to search artifacts by name, path, URI, digest, description, linked evidence, or linked experiment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Artifact query" },
+        kind: { type: "string", description: "Optional artifact kind filter" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+        limit: { type: "number", description: "Maximum results" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "memory_artifact_get",
+    description:
+      "Use to fetch one artifact record by ID within its project and agent scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Artifact ID" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "memory_experiment_create",
+    description:
+      "Use to create a first-class experiment with an objective, hypothesis, environment, revision, toolchain, commands, linked records, and provenance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        objective: { type: "string", description: "Experiment objective" },
+        hypothesis: { type: "string", description: "Hypothesis being tested" },
+        environment: { type: "string", description: "Runtime or hardware environment" },
+        sourceRevision: { type: "string", description: "Source revision or commit" },
+        commands: { type: "array", description: "Commands executed by the experiment" },
+        artifactIds: { type: "array", description: "Linked artifact IDs" },
+        evidenceIds: { type: "array", description: "Linked evidence IDs; each evidence record can belong to one experiment" },
+        observationIds: { type: "array", description: "Linked observation IDs" },
+        actionIds: { type: "array", description: "Linked action IDs" },
+        sessionIds: { type: "array", description: "Linked session IDs" },
+        graphNodeIds: { type: "array", description: "Linked graph node IDs" },
+        negativeMemoryIds: { type: "array", description: "Linked negative memory IDs" },
+        provenance: { type: "object", description: "Required provenance record" },
+        authority: { type: "object", description: "Optional authority metadata preserved across transfer" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Owning agent identity" },
+        idempotencyKey: { type: "string", description: "Durable request key when PostgreSQL metadata storage is enabled" },
+      },
+      required: ["objective", "provenance"],
+    },
+  },
+  {
+    name: "memory_experiment_update",
+    description:
+      "Use to update an experiment with its state, observations, artifacts, evidence, result, conclusion, or follow-up links.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Experiment ID" },
+        status: { type: "string", description: "planned, running, completed, failed, or cancelled" },
+        result: { type: "object", description: "Structured experiment result" },
+        conclusion: { type: "string", description: "Conclusion from the result" },
+        artifactIds: { type: "array", description: "Linked artifact IDs" },
+        evidenceIds: { type: "array", description: "Linked evidence IDs" },
+        observationIds: { type: "array", description: "Linked observation IDs" },
+        actionIds: { type: "array", description: "Linked action IDs" },
+        sessionIds: { type: "array", description: "Linked session IDs" },
+        graphNodeIds: { type: "array", description: "Linked graph node IDs" },
+        negativeMemoryIds: { type: "array", description: "Linked negative memory IDs" },
+        authority: { type: "object", description: "Optional authority metadata preserved across transfer" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "memory_experiment_get",
+    description:
+      "Use to fetch a first-class experiment by ID within its project and agent scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Experiment ID" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "memory_experiment_list",
+    description:
+      "Use to list first-class experiments by status and optional project or agent scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Optional experiment status filter" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+        limit: { type: "number", description: "Maximum results" },
+      },
+    },
+  },
+  {
+    name: "memory_experiment_search",
+    description:
+      "Use to search first-class experiments by objective, hypothesis, command, environment, result, conclusion, or linked records.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Experiment query" },
+        status: { type: "string", description: "Optional experiment status filter" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+        limit: { type: "number", description: "Maximum results" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "memory_experiment_expand",
+    description:
+      "Use to fetch an experiment together with its linked actions, sessions, observations, artifacts, evidence, graph nodes, and negative memories.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Experiment ID" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "memory_negative_memory_save",
+    description:
+      "Use to record a known-invalid, failed, or disproven approach with its reason, evidence, experiment links, environment, revision, validity interval, and provenance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        approach: { type: "string", description: "Approach that should not be retried unchanged" },
+        reason: { type: "string", description: "Observed reason it failed or is invalid" },
+        environment: { type: "string", description: "Environment where this result applies" },
+        sourceRevision: { type: "string", description: "Revision where this result applies" },
+        provenance: { type: "object", description: "Required provenance record" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Owning agent identity" },
+        idempotencyKey: { type: "string", description: "Durable request key when PostgreSQL metadata storage is enabled" },
+      },
+      required: ["approach", "reason", "provenance"],
+    },
+  },
+  {
+    name: "memory_negative_memory_lookup",
+    description:
+      "Use to check reusable do-not-retry knowledge before repeating an approach, scoped by project, agent, environment, revision, and historical validity.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Approach or task query" },
+        environment: { type: "string", description: "Optional environment filter" },
+        sourceRevision: { type: "string", description: "Optional revision filter" },
+        asOf: { type: "string", description: "Optional historical timestamp" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+        limit: { type: "number", description: "Maximum results" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "memory_temporal_query",
+    description:
+      "Use to retrieve memory assertions as current, as-of, or range-valid records while retaining historical and superseded versions when requested.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        asOf: { type: "string", description: "Timestamp for historical point-in-time retrieval" },
+        from: { type: "string", description: "Start timestamp for range retrieval" },
+        to: { type: "string", description: "End timestamp for range retrieval" },
+        includeHistory: { type: "boolean", description: "Include non-latest historical versions" },
+        project: { type: "string", description: "Canonical project identifier" },
+        agentId: { type: "string", description: "Agent scope" },
+      },
+    },
+  },
+  {
+    name: "memory_temporal_graph_query",
+    description:
+      "Use to inspect time-valid graph assertions for an entity as of a timestamp, including historical edges and their source observations.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        entityName: { type: "string", description: "Graph entity name or alias" },
+        asOf: { type: "string", description: "Optional timestamp for point-in-time graph state" },
+        includeHistory: { type: "boolean", description: "Include prior versions of graph edges" },
+      },
+      required: ["entityName"],
+    },
+  },
+  {
+    name: "memory_conflict_resolve",
+    description:
+      "Use to resolve a durable contradiction record with an explicit status, supporting reason, winner or per-memory epistemic states, without deleting either side's evidence.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        conflictId: { type: "string", description: "Conflict ID" },
+        status: { type: "string", description: "resolved, rejected, dismissed, or inconclusive" },
+        winnerMemoryId: { type: "string", description: "Optional implicated memory to mark verified" },
+        reason: { type: "string", description: "Resolution rationale" },
+        memoryStates: { type: "object", description: "Optional explicit memory-ID to epistemic-state map" },
+      },
+      required: ["conflictId", "status"],
+    },
+  },
+];
+
 export const ESSENTIAL_TOOLS = new Set([
   "memory_save",
   "memory_recall",
@@ -989,12 +1363,13 @@ export function getAllTools(): McpToolDef[] {
     ...V070_TOOLS,
     ...V073_TOOLS,
     ...V010_SLOTS_TOOLS,
+    ...V093_EVIDENCE_TOOLS,
   ];
 }
 
 // default switched from "core" (8 essential tools) to "all"
-// (full 54-tool surface). README and plugin manifests have always
-// advertised 54 tools "in proxy mode"; the old default left OpenCode /
+// (full 74-tool surface). README and plugin manifests advertise the
+// complete tool set; the old default left OpenCode /
 // Claude Code users seeing 8 with no indication the other tools existed.
 // Users who want the lean essentials can still set AGENTMEMORY_TOOLS=core.
 export function getVisibleTools(): McpToolDef[] {

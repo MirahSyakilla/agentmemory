@@ -1,7 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
-import type { CompressedObservation, EmbeddingProvider, GraphNode } from "../src/types.js";
+import { logger } from "../src/logger.js";
+import type {
+  CompressedObservation,
+  EmbeddingProvider,
+  GraphEdge,
+  GraphNode,
+} from "../src/types.js";
 
 function makeObs(
   overrides: Partial<CompressedObservation> = {},
@@ -24,6 +30,36 @@ function makeObs(
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
+  const list = async <T>(scope: string): Promise<T[]> => {
+    const entries = store.get(scope);
+    return entries ? (Array.from(entries.values()) as T[]) : [];
+  };
+  const getGraphNeighborhood = async (nodeIds: string[], maxDepth: number) => {
+    const nodes = await list<GraphNode>("mem:graph:nodes");
+    const edges = await list<GraphEdge>("mem:graph:edges");
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const included = new Set(nodeIds);
+    let frontier = nodeIds;
+    for (let depth = 0; depth < maxDepth; depth++) {
+      const next = new Set<string>();
+      for (const edge of edges) {
+        if (frontier.includes(edge.sourceNodeId)) next.add(edge.targetNodeId);
+        if (frontier.includes(edge.targetNodeId)) next.add(edge.sourceNodeId);
+      }
+      for (const id of next) included.add(id);
+      frontier = [...next];
+    }
+    return {
+      nodes: [...included]
+        .map((id) => nodeById.get(id))
+        .filter((node): node is GraphNode => Boolean(node)),
+      edges: edges.filter(
+        (edge) =>
+          included.has(edge.sourceNodeId) && included.has(edge.targetNodeId),
+      ),
+    };
+  };
+
   return {
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
@@ -36,9 +72,71 @@ function mockKV() {
     delete: async (scope: string, key: string): Promise<void> => {
       store.get(scope)?.delete(key);
     },
-    list: async <T>(scope: string): Promise<T[]> => {
-      const entries = store.get(scope);
-      return entries ? (Array.from(entries.values()) as T[]) : [];
+    list,
+    findGraphNodesByNames: async (names: string[]) =>
+      (await list<GraphNode>("mem:graph:nodes")).filter((node) =>
+        names.some((name) =>
+          node.name.toLowerCase().includes(name.toLowerCase()),
+        ),
+      ),
+    findGraphNodesByObservationIds: async (obsIds: string[]) =>
+      (await list<GraphNode>("mem:graph:nodes")).filter((node) =>
+        (node.sourceObservationIds ?? []).some((obsId) =>
+          obsIds.includes(obsId),
+        ),
+      ),
+    getGraphNeighborhood,
+  };
+}
+
+function delayedGraphKV(
+  delayMs: number,
+  mode: "resolve" | "reject" = "resolve",
+) {
+  const base = mockKV();
+  const delay = async (signal?: AbortSignal): Promise<void> => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delayMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        const error = new Error("graph backend aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    if (mode === "reject") throw new Error("graph backend failed");
+  };
+  return {
+    ...base,
+    findGraphNodesByNames: async (
+      names: string[],
+      _limit: number,
+      options?: { signal?: AbortSignal },
+    ) => {
+      await delay(options?.signal);
+      return base.findGraphNodesByNames(names);
+    },
+    findGraphNodesByObservationIds: async (
+      obsIds: string[],
+      _limit: number,
+      options?: { signal?: AbortSignal },
+    ) => {
+      await delay(options?.signal);
+      return base.findGraphNodesByObservationIds(obsIds);
+    },
+    getGraphNeighborhood: async (
+      nodeIds: string[],
+      maxDepth: number,
+      _maxNodes: number,
+      options?: { signal?: AbortSignal },
+    ) => {
+      await delay(options?.signal);
+      return base.getGraphNeighborhood(nodeIds, maxDepth);
     },
   };
 }
@@ -55,11 +153,13 @@ describe("HybridSearch", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (originalSmartSearchGraph === undefined) {
       delete process.env["AGENTMEMORY_SMART_SEARCH_GRAPH"];
     } else {
       process.env["AGENTMEMORY_SMART_SEARCH_GRAPH"] = originalSmartSearchGraph;
     }
+    delete process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"];
   });
 
   it("returns BM25-only results when no vector index is provided", async () => {
@@ -224,6 +324,92 @@ describe("HybridSearch", () => {
     expect(results).toHaveLength(1);
     expect(results[0].observation.id).toBe("obs_graph");
     expect(results[0].sessionId).toBe("ses_graph");
+    expect(results[0].graphScore).toBeGreaterThan(0);
+  });
+
+  it("returns BM25 results within the graph deadline when graph retrieval is slow", async () => {
+    process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"] = "100";
+    const obs = makeObs({ id: "obs_slow_graph", title: "React auth" });
+    bm25.add(obs);
+    const slowKv = delayedGraphKV(500);
+    await slowKv.set("mem:obs:ses_1", obs.id, obs);
+
+    const hybrid = new HybridSearch(bm25, null, null, slowKv as never);
+    const started = Date.now();
+    const results = await hybrid.search("React auth", 5);
+
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(results.map((result) => result.observation.id)).toContain(
+      "obs_slow_graph",
+    );
+    expect(results[0].graphScore).toBe(0);
+  });
+
+  it("keeps BM25 and vector results when graph retrieval rejects", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const obs = makeObs({ id: "obs_vector", title: "React vector result" });
+    bm25.add(obs);
+    const failingKv = delayedGraphKV(0, "reject");
+    await failingKv.set("mem:obs:ses_1", obs.id, obs);
+    const vector = {
+      size: 1,
+      search: async () => [
+        { obsId: obs.id, sessionId: obs.sessionId, score: 0.95 },
+      ],
+    };
+    const embeddingProvider: EmbeddingProvider = {
+      dimensions: 2,
+      embed: async () => new Float32Array([1, 0]),
+    };
+
+    const hybrid = new HybridSearch(
+      bm25,
+      vector as never,
+      embeddingProvider,
+      failingKv as never,
+    );
+    const results = await hybrid.search("React vector", 5);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].observation.id).toBe(obs.id);
+    expect(results[0].vectorScore).toBe(0.95);
+    expect(results[0].graphScore).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      "Graph retrieval failed; continuing without graph results",
+      expect.objectContaining({ stage: "entity lookup" }),
+    );
+  });
+
+  it("includes fast graph results before the deadline", async () => {
+    process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"] = "100";
+    const obs = makeObs({ id: "obs_fast_graph", sessionId: "ses_graph" });
+    bm25.add(obs);
+    const graphKv = delayedGraphKV(1);
+    const node: GraphNode = {
+      id: "gn_react_fast",
+      type: "library",
+      name: "React",
+      properties: {},
+      sourceObservationIds: [obs.id],
+      sourceSessionIds: [obs.sessionId],
+      createdAt: new Date().toISOString(),
+    };
+    await graphKv.set("mem:graph:nodes", node.id, node);
+    await graphKv.set("mem:obs:ses_graph", obs.id, obs);
+    await graphKv.set("mem:sessions", "ses_graph", {
+      id: "ses_graph",
+      project: "p",
+      cwd: "/repo",
+      startedAt: new Date().toISOString(),
+      status: "completed",
+      observationCount: 1,
+    });
+
+    const hybrid = new HybridSearch(bm25, null, null, graphKv as never);
+    const results = await hybrid.search("React", 5);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].observation.id).toBe(obs.id);
     expect(results[0].graphScore).toBeGreaterThan(0);
   });
 });

@@ -136,10 +136,13 @@ describe("session-start hook — context injection gate (#143)", () => {
 
   it("loads injection settings from ~/.agentmemory/.env and records emitted context", async () => {
     const home = mkdtempSync(join(tmpdir(), "agentmemory-hook-env-"));
-    const paths: string[] = [];
-    const server = createServer((req, res) => {
-      paths.push(req.url || "");
-      req.resume();
+      const paths: string[] = [];
+      const bodies: Record<string, unknown>[] = [];
+      const server = createServer((req, res) => {
+        paths.push(req.url || "");
+        let body = "";
+        req.on("data", (chunk) => { body += chunk.toString(); });
+        req.on("end", () => { if (body) bodies.push(JSON.parse(body)); });
       res.setHeader("content-type", "application/json");
       if (req.url === "/agentmemory/session/start") {
         res.end(JSON.stringify({
@@ -169,12 +172,13 @@ describe("session-start hook — context injection gate (#143)", () => {
     try {
       const result = await runHook(
         "session-start.mjs",
-        JSON.stringify({ session_id: "ses_env", cwd: "/tmp/project-env" }),
+        JSON.stringify({ session_id: "ses_env", cwd: "/tmp/project-env", agent_id: "agent-host" }),
         { HOME: home },
       );
-      expect(result.stdout).toContain("remembered");
-      expect(paths).toContain("/agentmemory/session/start");
-      expect(paths).toContain("/agentmemory/context-reduction/events");
+        expect(result.stdout).toContain("remembered");
+        expect(paths).toContain("/agentmemory/session/start");
+        expect(paths).toContain("/agentmemory/context-reduction/events");
+        expect(bodies.find((body) => body.sessionId === "ses_env")?.agentId).toBe("agent-host");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(home, { recursive: true, force: true });

@@ -17,7 +17,11 @@ function readText(relativePath: string): string {
 
 function countRestApiEndpoints(): number {
   const src = readText("src/triggers/api.ts");
-  return Array.from(src.matchAll(/api_path:\s*["`]/g)).length;
+  const staticEndpoints = Array.from(src.matchAll(/api_path:\s*["`]/g)).length;
+  const whitelistedEndpoints = Array.from(
+    src.matchAll(/^\s*registerWhitelisted(?:Post|Get)\(/gm),
+  ).length;
+  return staticEndpoints + whitelistedEndpoints;
 }
 
 describe("Consistency checks", () => {

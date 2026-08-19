@@ -38,6 +38,11 @@ export const KV = {
   graphNameIndex: "mem:graph:name-index",
   graphEdgeKey: "mem:graph:edge-key",
   graphNodeDegree: "mem:graph:node-degree",
+  // Observation -> graph-node reverse index used by bounded smart-search
+  // expansion. Each key stores a compact list of node ids.
+  graphObservationIndex: "mem:graph:observation-index",
+  // Resumable keyset cursor for the legacy observation-index maintenance job.
+  graphObservationIndexBackfill: "mem:graph:observation-index-backfill",
   semantic: "mem:semantic",
   procedural: "mem:procedural",
   teamShared: (teamId: string) => `mem:team:${teamId}:shared`,
@@ -74,6 +79,12 @@ export const KV = {
   // the followup-rate diagnostic. Key = sessionId. TTL-swept hourly.
   recentSearches: "mem:recent-searches",
   contextReductionEvents: "mem:context-reduction-events",
+  evidence: "mem:evidence",
+  artifacts: "mem:artifacts",
+  experiments: "mem:experiments",
+  negativeMemories: "mem:negative-memories",
+  conflicts: "mem:conflicts",
+  requestLedger: "mem:request-ledger",
 } as const;
 
 export const STREAM = {

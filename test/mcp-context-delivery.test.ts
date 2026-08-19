@@ -55,7 +55,7 @@ describe("MCP model-visible context delivery accounting", () => {
     const response = (await call({
       body: {
         name: "memory_recall",
-        arguments: { query: "decision", project: "project-a" },
+        arguments: { query: "decision", project: "project-a", agentId: "agent-a" },
       },
     })) as { body: { content: Array<{ text: string }> } };
     const text = response.body.content[0].text;
@@ -63,7 +63,7 @@ describe("MCP model-visible context delivery accounting", () => {
     expectDelivery(deliveries[0]!, "mcp_recall", text, "project-a");
     expect(trigger).toHaveBeenCalledWith({
       function_id: "mem::search",
-      payload: expect.objectContaining({ project: "project-a" }),
+       payload: expect.objectContaining({ project: "project-a", agentId: "agent-a" }),
     });
   });
 
@@ -74,7 +74,7 @@ describe("MCP model-visible context delivery accounting", () => {
     const response = (await call({
       body: {
         name: "memory_smart_search",
-        arguments: { query: "fix", project: "project-b" },
+        arguments: { query: "fix", project: "project-b", agentId: "agent-b" },
       },
     })) as { body: { content: Array<{ text: string }> } };
     const text = response.body.content[0].text;
@@ -82,7 +82,7 @@ describe("MCP model-visible context delivery accounting", () => {
     expectDelivery(deliveries[0]!, "mcp_smart_search", text, "project-b");
     expect(trigger).toHaveBeenCalledWith({
       function_id: "mem::smart-search",
-      payload: expect.objectContaining({ project: "project-b" }),
+       payload: expect.objectContaining({ project: "project-b", agentId: "agent-b" }),
     });
   });
 });

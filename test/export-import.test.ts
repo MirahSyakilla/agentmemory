@@ -17,6 +17,11 @@ import type {
   Memory,
   SessionSummary,
   ExportData,
+  Evidence,
+  Artifact,
+  Experiment,
+  NegativeMemory,
+  MemoryConflict,
 } from "../src/types.js";
 import { memoryToObservation } from "../src/state/memory-utils.js";
 
@@ -331,6 +336,170 @@ describe("Export/Import Functions", () => {
     )) as ExportData;
     expect(reExported.sessions.length).toBe(exported.sessions.length);
     expect(reExported.memories.length).toBe(exported.memories.length);
+  });
+
+  it("exports and imports structured evidence, artifacts, experiments, negative memory, and conflicts", async () => {
+    const evidence: Evidence = {
+      id: "evd_1",
+      kind: "log",
+      type: "log",
+      sourceIds: [],
+      provenance: { channel: "tool", capturedAt: "2026-08-19T00:00:00.000Z" },
+      capturedAt: "2026-08-19T00:00:00.000Z",
+      createdAt: "2026-08-19T00:00:00.000Z",
+    };
+    const artifact: Artifact = {
+      id: "art_1",
+      name: "report.json",
+      kind: "report",
+      type: "report",
+      experimentIds: ["exp_1"],
+      evidenceIds: [evidence.id],
+      provenance: evidence.provenance,
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.createdAt,
+    };
+    const experiment: Experiment = {
+      id: "exp_1",
+      objective: "Verify export",
+      commands: [],
+      inputs: [],
+      artifactIds: [artifact.id],
+      observationIds: [],
+      evidenceIds: [evidence.id],
+      followUp: [],
+      status: "completed",
+      provenance: evidence.provenance,
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.createdAt,
+    };
+    const negative: NegativeMemory = {
+      id: "neg_1",
+      approach: "skip export",
+      statement: "skip export is invalid",
+      reason: "verified persistence requirement",
+      status: "invalid",
+      experimentIds: [experiment.id],
+      evidenceIds: [evidence.id],
+      confidence: 1,
+      provenance: evidence.provenance,
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.createdAt,
+    };
+    const conflict: MemoryConflict = {
+      id: "conf_1",
+      memoryIds: ["mem_1", "mem_2"],
+      status: "open",
+      detectedBy: "manual",
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.createdAt,
+    };
+    await Promise.all([
+      kv.set("mem:evidence", evidence.id, evidence),
+      kv.set("mem:artifacts", artifact.id, artifact),
+      kv.set("mem:experiments", experiment.id, experiment),
+      kv.set("mem:negative-memories", negative.id, negative),
+      kv.set("mem:conflicts", conflict.id, conflict),
+    ]);
+
+    const exported = (await sdk.trigger("mem::export", {})) as ExportData;
+    expect(exported.evidence?.[0].id).toBe(evidence.id);
+    expect(exported.artifacts?.[0].id).toBe(artifact.id);
+    expect(exported.experiments?.[0].id).toBe(experiment.id);
+    expect(exported.negativeMemories?.[0].id).toBe(negative.id);
+    expect(exported.conflicts?.[0].id).toBe(conflict.id);
+
+    const freshKv = mockKV();
+    const freshSdk = mockSdk();
+    registerExportImportFunction(freshSdk as never, freshKv as never);
+    await freshSdk.trigger("mem::import", { exportData: exported, strategy: "merge" });
+    expect(await freshKv.get("mem:evidence", evidence.id)).not.toBeNull();
+    expect(await freshKv.get("mem:artifacts", artifact.id)).not.toBeNull();
+    expect(await freshKv.get("mem:experiments", experiment.id)).not.toBeNull();
+    expect(await freshKv.get("mem:negative-memories", negative.id)).not.toBeNull();
+    expect(await freshKv.get("mem:conflicts", conflict.id)).not.toBeNull();
+  });
+
+  it("reconciles imported structured experiment links without changing authority", async () => {
+    const timestamp = "2026-08-19T00:00:00.000Z";
+    const provenance = { channel: "user" as const, capturedAt: timestamp };
+    const evidence: Evidence = {
+      id: "evd_linked",
+      kind: "log",
+      type: "log",
+      sourceIds: [],
+      provenance,
+      capturedAt: timestamp,
+      createdAt: timestamp,
+    };
+    const artifact: Artifact = {
+      id: "art_linked",
+      name: "report.txt",
+      kind: "report",
+      type: "report",
+      experimentIds: [],
+      evidenceIds: [],
+      provenance,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const experiment: Experiment = {
+      id: "exp_linked",
+      objective: "Preserve imported links",
+      commands: [],
+      inputs: [],
+      artifactIds: [artifact.id],
+      observationIds: ["obs_1"],
+      evidenceIds: [evidence.id],
+      actionIds: ["act_1"],
+      sessionIds: ["ses_1"],
+      graphNodeIds: ["gn_1"],
+      negativeMemoryIds: ["neg_linked"],
+      followUp: [],
+      status: "completed",
+      provenance,
+      authority: { source: "user", confidence: 1 },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const negativeMemory: NegativeMemory = {
+      id: "neg_linked",
+      approach: "skip the import",
+      statement: "Skipping is invalid",
+      reason: "the experiment requires it",
+      status: "invalid",
+      experimentIds: [],
+      evidenceIds: [],
+      confidence: 1,
+      provenance,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const exportData: ExportData = {
+      version: "0.9.29",
+      exportedAt: timestamp,
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      evidence: [evidence],
+      artifacts: [artifact],
+      experiments: [experiment],
+      negativeMemories: [negativeMemory],
+    };
+    const freshKv = mockKV();
+    const freshSdk = mockSdk();
+    registerExportImportFunction(freshSdk as never, freshKv as never);
+
+    const result = (await freshSdk.trigger("mem::import", {
+      exportData,
+      strategy: "merge",
+    })) as { success: boolean };
+    expect(result.success).toBe(true);
+    expect((await freshKv.get<Artifact>("mem:artifacts", artifact.id))?.experimentIds).toEqual([experiment.id]);
+    expect((await freshKv.get<Evidence>("mem:evidence", evidence.id))?.experimentId).toBe(experiment.id);
+    expect((await freshKv.get<NegativeMemory>("mem:negative-memories", negativeMemory.id))?.experimentIds).toEqual([experiment.id]);
+    expect((await freshKv.get<Experiment>("mem:experiments", experiment.id))?.authority).toEqual({ source: "user", confidence: 1 });
   });
 
   it("import rejects unsupported version", async () => {

@@ -47,9 +47,14 @@ export function registerContextFunction(
       project: string;
       budget?: number;
       agentId?: string;
+      query?: string;
     }) => {
       const budget = data.budget || tokenBudget;
       const blocks: ContextBlock[] = [];
+      const query =
+        typeof data.query === "string" && data.query.trim()
+          ? data.query.trim()
+          : undefined;
 
       // Cross-agent isolation for the injected-context path. Mirrors the
       // filter mem::search / mem::smart-search already apply so /context
@@ -234,6 +239,63 @@ export function registerContextFunction(
             tokens: estimateContextTokens(content),
             recency: new Date(sessions[i].startedAt).getTime(),
             sourceIds: top.map((o) => o.id),
+          });
+        }
+      }
+
+      // A host-provided opening prompt is the one reliable task signal at
+      // SessionStart. Reserve a bounded part of the existing context budget
+      // for the deterministic multi-store plan; older clients that omit a
+      // prompt keep the legacy context-only behavior.
+      if (query) {
+        const plannedBudget = Math.max(1, Math.min(1_200, Math.floor(budget * 0.35)));
+        try {
+          const planned = await sdk.trigger({
+            function_id: "mem::retrieval-plan",
+            payload: {
+              query,
+              project: data.project,
+              tokenBudget: plannedBudget,
+              ...(filterAgentId ? { agentId: filterAgentId } : {}),
+            },
+          }) as {
+            success?: boolean;
+            context?: {
+              tiers?: Record<string, Array<{
+                title?: string;
+                content?: string;
+                tokens?: number;
+                score?: number;
+                metadata?: { timestamp?: string };
+              }>>;
+            };
+          };
+          if (planned.success && planned.context?.tiers) {
+            const tierLabels: Record<string, string> = {
+              direct: "Retrieved Context",
+              supporting: "Supporting Context",
+              historical: "Historical Context",
+              provenance: "Evidence And Provenance",
+            };
+            for (const tier of ["direct", "supporting", "historical", "provenance"]) {
+              for (const entry of planned.context.tiers[tier] ?? []) {
+                if (!entry.content) continue;
+                const content = `## ${tierLabels[tier]}${entry.title ? `: ${entry.title}` : ""}\n${entry.content}`;
+                blocks.push({
+                  type: "memory",
+                  content,
+                  tokens: entry.tokens ?? estimateContextTokens(content),
+                  recency:
+                    typeof entry.metadata?.timestamp === "string"
+                      ? new Date(entry.metadata.timestamp).getTime()
+                      : Date.now(),
+                });
+              }
+            }
+          }
+        } catch (error) {
+          logger.warn("Planned retrieval unavailable for context injection", {
+            error: error instanceof Error ? error.message : String(error),
           });
         }
       }

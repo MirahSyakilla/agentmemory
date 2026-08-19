@@ -1,3 +1,5 @@
+import type { GraphEdge, GraphNode } from "../types.js";
+
 export type StateKVJsonPrimitive = string | number | boolean | null;
 
 export type StateKVJsonFilter =
@@ -20,11 +22,42 @@ export interface StateKVJsonAggregateResult {
   stringValues: Record<string, string[]>;
 }
 
+export interface StateKVGraphQueryOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface StateKVGraphNeighborhood {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface StateKVGraphNodePage {
+  nodes: GraphNode[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface StateKVGraphObservationIndexEntry {
+  observationId: string;
+  nodeIds: string[];
+}
+
+export interface StateKVClaimResult<T = unknown> {
+  claimed: boolean;
+  value: T | null;
+}
+
 export interface StateKVBackend {
   readonly name: string;
   handles(scope: string): boolean;
   get<T = unknown>(scope: string, key: string): Promise<T | null>;
   set<T = unknown>(scope: string, key: string, value: T): Promise<T>;
+  claim?<T = unknown>(
+    scope: string,
+    key: string,
+    value: T,
+  ): Promise<StateKVClaimResult<T>>;
   update<T = unknown>(
     scope: string,
     key: string,
@@ -32,6 +65,37 @@ export interface StateKVBackend {
   ): Promise<T>;
   delete(scope: string, key: string): Promise<void>;
   list<T = unknown>(scope: string): Promise<T[]>;
+  /** Optional bounded list used by latency-sensitive graph retrieval. */
+  listWithTimeout?<T = unknown>(
+    scope: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<T[]>;
+  findGraphNodesByNames?(
+    names: string[],
+    limit: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<GraphNode[]>;
+  findGraphNodesByObservationIds?(
+    observationIds: string[],
+    limit: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<GraphNode[]>;
+  getGraphNeighborhood?(
+    nodeIds: string[],
+    maxDepth: number,
+    maxNodes: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<StateKVGraphNeighborhood>;
+  pageGraphNodes?(
+    afterId: string,
+    limit: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<StateKVGraphNodePage>;
+  mergeGraphObservationIndex?(
+    entries: StateKVGraphObservationIndexEntry[],
+    options?: StateKVGraphQueryOptions,
+  ): Promise<void>;
   aggregateJson?(
     request: StateKVJsonAggregateRequest,
   ): Promise<StateKVJsonAggregateResult>;

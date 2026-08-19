@@ -17,6 +17,12 @@ import {
 } from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
+import {
+  validateMemoryOrigin,
+  validateMemoryMetadata,
+  type MemoryMetadata,
+  type RichMemory,
+} from "./temporal-memory.js";
 
 // Slicing by UTF-16 code unit can cut an astral character (emoji, some CJK
 // extensions) mid surrogate pair, leaving a lone high surrogate that renders
@@ -38,6 +44,17 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       sourceObservationIds?: string[];
       agentId?: string;
       project?: string;
+      state?: string;
+      epistemicState?: string;
+      layer?: string;
+      temporal?: Record<string, unknown>;
+      authority?: Record<string, unknown> | string;
+      evidenceIds?: string[];
+      artifactIds?: string[];
+      experimentIds?: string[];
+      conflictIds?: string[];
+      references?: Record<string, unknown>;
+      origin?: Memory["origin"];
     }) => {
       if (
         !data.content ||
@@ -55,6 +72,10 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       if (data.sourceObservationIds && !Array.isArray(data.sourceObservationIds)) {
         return { success: false, error: "sourceObservationIds must be an array" };
       }
+      const metadata = validateMemoryMetadata(data, true);
+      if (metadata.error) return { success: false, error: metadata.error };
+      const origin = validateMemoryOrigin(data.origin);
+      if (origin.error) return { success: false, error: origin.error };
       const validTypes = new Set([
         "pattern",
         "preference",
@@ -85,7 +106,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         // falls back to the full scan so supersession never silently
         // stops working.
         const idx = getLexicalStore();
-        let candidateMemories: Memory[];
+        let candidateMemories: RichMemory[];
         try {
           if (isMemoryIndexReady() && idx.size > 0) {
             // 50 hits, not 20: the shared index also holds observations,
@@ -98,12 +119,12 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
               .filter((h) => h.obsId.startsWith("mem_"));
             const loaded = await Promise.all(
               hits.map((h) =>
-                kv.get<Memory>(KV.memories, h.obsId).catch(() => null),
+                kv.get<RichMemory>(KV.memories, h.obsId).catch(() => null),
               ),
             );
-            candidateMemories = loaded.filter((m): m is Memory => m !== null);
+            candidateMemories = loaded.filter((m): m is RichMemory => m !== null);
           } else {
-            candidateMemories = await kv.list<Memory>(KV.memories);
+            candidateMemories = await kv.list<RichMemory>(KV.memories);
           }
         } catch (err) {
           // Candidate generation is an optimization; a failure here must
@@ -111,11 +132,11 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           logger.warn("supersession candidate lookup failed, using full scan", {
             error: err instanceof Error ? err.message : JSON.stringify(err),
           });
-          candidateMemories = await kv.list<Memory>(KV.memories);
+          candidateMemories = await kv.list<RichMemory>(KV.memories);
         }
         let supersededId: string | undefined;
         let supersededVersion = 1;
-        let supersededMemory: Memory | undefined;
+        let supersededMemory: RichMemory | undefined;
         // Track the closest sub-threshold match: not similar enough to
         // supersede, but similar enough that the caller may want to
         // consolidate. Reported back as a hint; never acted on here.
@@ -157,7 +178,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             ? data.agentId.trim().slice(0, 128)
             : getAgentId();
 
-        const memory: Memory = {
+        const memory: RichMemory = {
           id: generateId("mem"),
           createdAt: now,
           updatedAt: now,
@@ -175,9 +196,11 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             (id): id is string => typeof id === "string" && id.length > 0,
           ),
           isLatest: true,
-          origin: { channel: "agent", capturedAt: now },
           ...(callAgentId ? { agentId: callAgentId } : {}),
           ...(project !== undefined && { project }),
+          ...(metadata.value as MemoryMetadata),
+          origin: origin.value ?? { channel: "agent", capturedAt: now },
+          authority: metadata.value?.authority ?? { source: "agent", score: 0.55 },
         };
 
         if (data.ttlDays && typeof data.ttlDays === "number" && data.ttlDays > 0) {

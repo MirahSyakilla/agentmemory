@@ -33,3 +33,21 @@ export function hookCwd(data: Record<string, unknown> | null | undefined): strin
   if (projectDir && projectDir.trim()) return projectDir;
   return undefined;
 }
+
+// Hook providers do not agree on agent naming. Prefer an explicit host value
+// over the process default so a shared daemon retains subagent attribution.
+export function hookAgentId(
+  data: Record<string, unknown> | null | undefined,
+): string | undefined {
+  const values = data
+    ? [data.agentId, data.agent_id, data.agentName, data.agent_name]
+    : [];
+  values.push(process.env["AGENT_ID"]);
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim().slice(0, 128);
+  }
+  if (process.env["OPENCODE"] === "1") return "opencode";
+  if (process.env["CODEX_THREAD_ID"]) return "codex";
+  if (process.env["CLAUDE_PROJECT_DIR"]) return "claude-code";
+  return undefined;
+}

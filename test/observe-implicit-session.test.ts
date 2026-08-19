@@ -90,6 +90,28 @@ describe("observe implicit session create (#638)", () => {
     expect(session.firstPrompt).toBe("ship the helm chart");
   });
 
+  it("attributes an implicit session and its observation to the host agent", async () => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+
+    const result = (await sdk.trigger("mem::observe", {
+      sessionId: "ses_agent_attributed",
+      project: "project",
+      cwd: "/tmp/project",
+      hookType: "post_tool_use",
+      timestamp: new Date().toISOString(),
+      agentId: "opencode",
+      data: { tool_name: "Read" },
+    })) as { observationId: string };
+
+    const session = kv.store.get("mem:sessions")!.get("ses_agent_attributed") as Record<string, unknown>;
+    const observation = kv.store.get("mem:obs:ses_agent_attributed")!.get(result.observationId) as Record<string, unknown>;
+    expect(session.agentId).toBe("opencode");
+    expect(observation.agentId).toBe("opencode");
+  });
+
   it("does not implicit-create when project+cwd missing (test-payload back-compat)", async () => {
     const { registerObserveFunction } = await import("../src/functions/observe.js");
     const sdk = mockSdk();

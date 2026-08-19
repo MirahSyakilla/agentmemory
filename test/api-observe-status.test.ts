@@ -36,4 +36,34 @@ describe("api::observe status mapping", () => {
       error: "Session observation limit reached (500)",
     });
   });
+
+  it("whitelists agent identity from hook payloads", async () => {
+    const handlers = new Map<string, (req: unknown) => Promise<unknown>>();
+    const sdk = {
+      registerFunction: vi.fn((id: string, handler: (req: unknown) => Promise<unknown>) => {
+        handlers.set(id, handler);
+      }),
+      registerTrigger: vi.fn(),
+      trigger: vi.fn(async () => ({ success: true })),
+    };
+    registerApiTriggers(sdk as never, {} as never);
+    const handler = handlers.get("api::observe")!;
+
+    await handler({
+      body: {
+        hookType: "prompt_submit",
+        sessionId: "session-1",
+        project: "project-1",
+        cwd: "/tmp/project-1",
+        timestamp: "2026-06-17T19:00:00.000Z",
+        agent_id: "codex",
+        data: { prompt: "remember this" },
+      },
+    });
+
+    expect(sdk.trigger).toHaveBeenCalledWith({
+      function_id: "mem::observe",
+      payload: expect.objectContaining({ agentId: "codex" }),
+    });
+  });
 });

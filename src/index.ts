@@ -117,6 +117,11 @@ import { registerRetentionFunctions } from "./functions/retention.js";
 import { registerCompressFileFunction } from "./functions/compress-file.js";
 import { registerReplayFunctions } from "./functions/replay.js";
 import { registerContextReductionFunctions } from "./functions/context-reduction.js";
+import { registerEvidenceFunctions } from "./functions/evidence.js";
+import { registerArtifactFunctions } from "./functions/artifacts.js";
+import { registerExperimentFunctions } from "./functions/experiments.js";
+import { registerNegativeMemoryFunctions } from "./functions/negative-memories.js";
+import { registerPlannedRetrievalFunctions } from "./functions/planned-retrieval.js";
 import { registerApiTriggers } from "./triggers/api.js";
 import { registerEventTriggers } from "./triggers/events.js";
 import { registerMcpEndpoints } from "./mcp/server.js";
@@ -368,6 +373,10 @@ async function main() {
   registerRememberFunction(sdk, kv);
   registerEvictFunction(sdk, kv);
   registerFinalizeIdleSessionsFunction(sdk, kv);
+  registerEvidenceFunctions(sdk, kv);
+  registerArtifactFunctions(sdk, kv);
+  registerExperimentFunctions(sdk, kv);
+  registerNegativeMemoryFunctions(sdk, kv);
 
   registerRelationsFunction(sdk, kv);
   registerTimelineFunction(sdk, kv);
@@ -502,6 +511,7 @@ async function main() {
     hybridSearch.search(query, limit);
   registerSmartSearchFunction(sdk, kv, hybridRanker);
   setHybridRanker(hybridRanker);
+  registerPlannedRetrievalFunctions(sdk, kv);
   registerRecentSearchesSweepFunction(sdk, kv);
 
   registerApiTriggers(sdk, kv, secret, metricsStore, provider);
@@ -665,7 +675,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 133 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 156 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,

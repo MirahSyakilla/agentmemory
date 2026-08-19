@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "./_env.js";
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -34,7 +34,7 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId || data.conversation_id) as string) || "unknown";
-  const agentId = data.agent_id || data.agentName;
+  const agentId = hookAgentId(data);
   const agentType = data.agent_type || data.agentDisplayName || data.agentName;
   const lastMsg =
     typeof data.last_assistant_message === "string"
@@ -52,6 +52,7 @@ async function main() {
       project: resolveProject(cwd),
       cwd,
       timestamp: new Date().toISOString(),
+      ...(agentId ? { agentId } : {}),
       data: {
         agent_id: agentId,
         agent_type: agentType,

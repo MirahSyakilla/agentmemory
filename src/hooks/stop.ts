@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import "./_env.js";
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 
 // Inlined — see src/hooks/sdk-guard.ts for canonical version. Kept local
 // per-hook so tsdown does not emit a shared hashed chunk that would churn
@@ -45,6 +45,7 @@ async function main() {
     ((data.session_id || data.sessionId || data.conversation_id) as string) ||
     "unknown";
   const cwd = hookCwd(data) || process.cwd();
+  const agentId = hookAgentId(data);
   const turnId =
     typeof data.turn_id === "string"
       ? data.turn_id
@@ -83,6 +84,7 @@ async function main() {
       project: resolveProject(cwd),
       cwd,
       timestamp: new Date().toISOString(),
+      ...(agentId ? { agentId } : {}),
       ...(turnId ? { turnId } : {}),
       ...(model ? { model } : {}),
       ...(lastAssistantMessage ? { lastAssistantMessage } : {}),

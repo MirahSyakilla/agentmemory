@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { hookAgentId, resolveProject } from "./_project.js";
 import { loadHookEnv } from "./_env.js";
 import { recordContextReduction } from "./_context-reduction.js";
 import type { ContextReductionAccounting } from "../types.js";
@@ -134,6 +134,7 @@ async function main() {
     typeof data.project === "string" && data.project.trim().length > 0
       ? data.project.trim()
       : resolveProject(data.cwd as string | undefined);
+  const agentId = hookAgentId(data);
 
   try {
     const res = await fetch(`${REST_URL}/agentmemory/enrich`, {
@@ -145,6 +146,7 @@ async function main() {
         terms,
         toolName,
         ...(project !== undefined && { project }),
+        ...(agentId ? { agentId } : {}),
       }),
       signal: AbortSignal.timeout(2000),
     });

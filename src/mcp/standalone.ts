@@ -180,6 +180,10 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
       if (typeof project === "string" && project.trim().length > 0) {
         v.project = project.trim();
       }
+      const agentId = args["agentId"];
+      if (typeof agentId === "string" && agentId.trim().length > 0) {
+        v.agentId = agentId.trim();
+      }
       const budget = args["token_budget"];
       if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) {
         v.tokenBudget = Math.floor(budget);
@@ -238,6 +242,7 @@ async function handleProxy(
       };
       if (v.tokenBudget != null) body["token_budget"] = v.tokenBudget;
       if (v.project !== undefined) body["project"] = v.project;
+      if (v.agentId !== undefined) body["agentId"] = v.agentId;
       const result = await handle.call("/agentmemory/search", {
         method: "POST",
         body: JSON.stringify(body),
@@ -251,6 +256,7 @@ async function handleProxy(
       if (v.format != null) body["format"] = v.format;
       if (v.tokenBudget != null) body["token_budget"] = v.tokenBudget;
       if (v.project !== undefined) body["project"] = v.project;
+      if (v.agentId !== undefined) body["agentId"] = v.agentId;
       const result = await handle.call("/agentmemory/smart-search", {
         method: "POST",
         body: JSON.stringify(body),
@@ -316,6 +322,7 @@ async function handleLocal(
         isLatest: true,
         sessionIds: [],
         ...(v.project !== undefined && { project: v.project }),
+        ...(v.agentId !== undefined && { agentId: v.agentId }),
       });
       kvInstance.persist();
       return textResponse({ saved: id });
@@ -330,6 +337,7 @@ async function handleLocal(
       const results = all
         .filter((m) => {
           if (v.project && m["project"] !== v.project) return false;
+          if (v.agentId && v.agentId !== "*" && m["agentId"] !== v.agentId) return false;
           const text = [
             typeof m["title"] === "string" ? m["title"] : "",
             typeof m["content"] === "string" ? m["content"] : "",

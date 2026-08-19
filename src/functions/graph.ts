@@ -4,6 +4,7 @@ import type {
   GraphEdge,
   GraphQueryResult,
   GraphSnapshot,
+  GraphObservationIndexBackfillState,
   CompressedObservation,
   MemoryProvider,
 } from "../types.js";
@@ -14,8 +15,9 @@ import {
   buildGraphExtractionPrompt,
 } from "../prompts/graph-extraction.js";
 import { isGraphExtractionEnabled } from "../config.js";
-import { recordAudit } from "./audit.js";
+import { recordAudit, safeAudit } from "./audit.js";
 import { logger } from "../logger.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
 
 // #753: keep the response payload below the iii state channel ceiling.
 // 500 nodes + their incident edges hold well under the limit on the
@@ -202,6 +204,12 @@ function compactGraphQueryResult(
 // Operators above the threshold should use mem::graph-reset and let
 // future extracts rebuild incrementally.
 const REBUILD_SAFE_NODE_CEILING = 25000;
+const GRAPH_OBSERVATION_INDEX_BACKFILL_KEY = "current";
+const GRAPH_OBSERVATION_INDEX_BACKFILL_DEFAULT_PAGE_SIZE = 10;
+const GRAPH_OBSERVATION_INDEX_BACKFILL_MAX_PAGE_SIZE = 25;
+const GRAPH_OBSERVATION_INDEX_BACKFILL_DEFAULT_MAX_PAGES = 1;
+const GRAPH_OBSERVATION_INDEX_BACKFILL_MAX_PAGES = 10;
+const GRAPH_OBSERVATION_INDEX_BACKFILL_TIMEOUT_MS = 5000;
 
 function nameIndexKey(type: string, name: string): string {
   return `${type}|${name}`;
@@ -215,6 +223,66 @@ function edgeIndexKey(
   return `${sourceNodeId}|${targetNodeId}|${type}`;
 }
 
+async function writeGraphObservationIndex(
+  kv: StateKV,
+  index: Map<string, Set<string>>,
+): Promise<void> {
+  const entries = [...index];
+  const batchSize = 100;
+  for (let i = 0; i < entries.length; i += batchSize) {
+    await Promise.all(
+      entries.slice(i, i + batchSize).map(([obsId, nodeIds]) =>
+        kv.set(KV.graphObservationIndex, obsId, [...nodeIds]),
+      ),
+    );
+  }
+}
+
+async function mergeGraphObservationIndex(
+  kv: StateKV,
+  index: Map<string, Set<string>>,
+): Promise<void> {
+  const entries = [...index];
+  const batchSize = 100;
+  for (let i = 0; i < entries.length; i += batchSize) {
+    await Promise.all(
+      entries.slice(i, i + batchSize).map(async ([obsId, nodeIds]) => {
+        const existing =
+          (await kv.get<string[]>(KV.graphObservationIndex, obsId)) ?? [];
+        const merged = [...new Set([...existing, ...nodeIds])];
+        if (merged.length !== existing.length) {
+          await kv.set(KV.graphObservationIndex, obsId, merged);
+        }
+      }),
+    );
+  }
+}
+
+function parseBackfillInt(
+  value: unknown,
+  fallback: number,
+  max: number,
+): number {
+  const parsed =
+    typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(max, Math.floor(parsed)));
+}
+
+function emptyObservationIndexBackfillState(
+  now: string,
+): GraphObservationIndexBackfillState {
+  return {
+    version: 1,
+    cursor: "",
+    processedNodes: 0,
+    processedObservationEntries: 0,
+    indexedReferences: 0,
+    startedAt: now,
+    updatedAt: now,
+  };
+}
+
 export async function rebuildGraphIndexes(kv: StateKV): Promise<GraphSnapshot> {
   const [nodes, edges] = await Promise.all([
     kv.list<GraphNode>(KV.graphNodes),
@@ -223,9 +291,16 @@ export async function rebuildGraphIndexes(kv: StateKV): Promise<GraphSnapshot> {
   const liveNodes = nodes.filter((node) => !node.stale);
   const liveEdges = edges.filter((edge) => !edge.stale);
   const degree = new Map<string, number>();
+  const observationIndex = new Map<string, Set<string>>();
   for (const edge of liveEdges) {
     degree.set(edge.sourceNodeId, (degree.get(edge.sourceNodeId) ?? 0) + 1);
     degree.set(edge.targetNodeId, (degree.get(edge.targetNodeId) ?? 0) + 1);
+  }
+  for (const node of liveNodes) {
+    for (const obsId of node.sourceObservationIds ?? []) {
+      if (!observationIndex.has(obsId)) observationIndex.set(obsId, new Set());
+      observationIndex.get(obsId)!.add(node.id);
+    }
   }
 
   const batchSize = 100;
@@ -248,6 +323,7 @@ export async function rebuildGraphIndexes(kv: StateKV): Promise<GraphSnapshot> {
       ),
     );
   }
+  await writeGraphObservationIndex(kv, observationIndex);
 
   const snapshot = buildSnapshotFromArrays(nodes, edges);
   await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snapshot);
@@ -646,6 +722,7 @@ export async function persistGraphDelta(
   // changing the counts; track that separately so the snapshot still persists.
   let snapMutated = false;
   const newEdgesForTopCheck: GraphEdge[] = [];
+  const observationIndex = new Map<string, Set<string>>();
   // When a freshly-minted node merges into an existing row via the name
   // index, edges in the same batch still reference the fresh id. Remap edge
   // endpoints to the persisted ids so edges never dangle and re-runs hit the
@@ -700,7 +777,15 @@ export async function persistGraphDelta(
         snap.topDegrees[node.id] = 0;
       }
     }
+
+    const persistedNodeId = idRemap.get(node.id) ?? node.id;
+    for (const obsId of node.sourceObservationIds ?? []) {
+      if (!observationIndex.has(obsId)) observationIndex.set(obsId, new Set());
+      observationIndex.get(obsId)!.add(persistedNodeId);
+    }
   }
+
+  await mergeGraphObservationIndex(kv, observationIndex);
 
   for (const rawEdge of edges) {
     const edge: GraphEdge = {
@@ -853,6 +938,149 @@ export function registerGraphFunction(
         return { success: false, error: msg };
       }
     },
+  );
+
+  // Legacy graph rows store provenance inside the serialized node value, but
+  // pre-targeted Neo4j deployments do not have the observation reverse index.
+  // Process a small keyset page per invocation so the repair never calls
+  // kv.list or constructs the entire graph in the worker.
+  sdk.registerFunction(
+    "mem::graph-observation-index-backfill",
+    async (data?: {
+      reset?: boolean;
+      pageSize?: number;
+      maxPages?: number;
+    }) =>
+      withKeyedLock("mem:graph-observation-index-backfill", async () => {
+        const pageSize = parseBackfillInt(
+          data?.pageSize,
+          GRAPH_OBSERVATION_INDEX_BACKFILL_DEFAULT_PAGE_SIZE,
+          GRAPH_OBSERVATION_INDEX_BACKFILL_MAX_PAGE_SIZE,
+        );
+        const maxPages = parseBackfillInt(
+          data?.maxPages,
+          GRAPH_OBSERVATION_INDEX_BACKFILL_DEFAULT_MAX_PAGES,
+          GRAPH_OBSERVATION_INDEX_BACKFILL_MAX_PAGES,
+        );
+        const pageGraphNodes = async (afterId: string, limit: number) =>
+          kv.pageGraphNodes(afterId, limit, {
+            timeoutMs: GRAPH_OBSERVATION_INDEX_BACKFILL_TIMEOUT_MS,
+          });
+
+        const existing = await kv.get<GraphObservationIndexBackfillState>(
+          KV.graphObservationIndexBackfill,
+          GRAPH_OBSERVATION_INDEX_BACKFILL_KEY,
+        );
+        if (existing?.completedAt && !data?.reset) {
+          return {
+            success: true,
+            complete: true,
+            alreadyComplete: true,
+            ...existing,
+          };
+        }
+
+        const startedAt = new Date().toISOString();
+        const state =
+          data?.reset || !existing
+            ? emptyObservationIndexBackfillState(startedAt)
+            : { ...existing };
+        let pagesProcessed = 0;
+        let pageNodes = 0;
+        let pageObservationEntries = 0;
+        let pageIndexedReferences = 0;
+        let complete = false;
+
+        while (pagesProcessed < maxPages) {
+          const page = await pageGraphNodes(state.cursor, pageSize);
+          if (page === null) {
+            return {
+              success: false,
+              error: "Neo4j graph node paging is unavailable",
+              ...state,
+            };
+          }
+
+          const observationIndex = new Map<string, Set<string>>();
+          for (const node of page.nodes) {
+            for (const obsId of node.sourceObservationIds ?? []) {
+              if (!observationIndex.has(obsId)) {
+                observationIndex.set(obsId, new Set());
+              }
+              observationIndex.get(obsId)!.add(node.id);
+            }
+          }
+          const entries = [...observationIndex].map(
+            ([observationId, nodeIds]) => ({
+              observationId,
+              nodeIds: [...nodeIds],
+            }),
+          );
+          const merged = await kv.mergeGraphObservationIndex(entries, {
+            timeoutMs: GRAPH_OBSERVATION_INDEX_BACKFILL_TIMEOUT_MS,
+          });
+          if (!merged) {
+            return {
+              success: false,
+              error: "Neo4j graph reverse-index writes are unavailable",
+              ...state,
+            };
+          }
+
+          const indexedReferences = entries.reduce(
+            (sum, entry) => sum + entry.nodeIds.length,
+            0,
+          );
+          pageNodes += page.nodes.length;
+          pageObservationEntries += entries.length;
+          pageIndexedReferences += indexedReferences;
+          state.processedNodes += page.nodes.length;
+          state.processedObservationEntries += entries.length;
+          state.indexedReferences += indexedReferences;
+          state.cursor = page.nextCursor ?? state.cursor;
+          state.updatedAt = new Date().toISOString();
+          pagesProcessed += 1;
+          complete = !page.hasMore;
+
+          await kv.set(
+            KV.graphObservationIndexBackfill,
+            GRAPH_OBSERVATION_INDEX_BACKFILL_KEY,
+            state,
+          );
+
+          if (complete || page.nodes.length === 0) break;
+        }
+
+        if (complete) state.completedAt = state.updatedAt;
+        await kv.set(
+          KV.graphObservationIndexBackfill,
+          GRAPH_OBSERVATION_INDEX_BACKFILL_KEY,
+          state,
+        );
+        await safeAudit(
+          kv,
+          "graph_backfill",
+          "mem::graph-observation-index-backfill",
+          [],
+          {
+            pagesProcessed,
+            pageNodes,
+            pageObservationEntries,
+            pageIndexedReferences,
+            complete,
+            cursor: state.cursor,
+          },
+        );
+        return {
+          success: true,
+          complete,
+          pagesProcessed,
+          pageNodes,
+          pageObservationEntries,
+          pageIndexedReferences,
+          ...state,
+        };
+      }),
   );
 
   // #753: every branch now applies a default cap and reports the
@@ -1153,9 +1381,18 @@ export function registerGraphFunction(
       const liveNodes = nodes.filter((n) => !n.stale);
       const liveEdges = edges.filter((e) => !e.stale);
       const degree = new Map<string, number>();
+      const observationIndex = new Map<string, Set<string>>();
       for (const e of liveEdges) {
         degree.set(e.sourceNodeId, (degree.get(e.sourceNodeId) ?? 0) + 1);
         degree.set(e.targetNodeId, (degree.get(e.targetNodeId) ?? 0) + 1);
+      }
+      for (const node of liveNodes) {
+        for (const obsId of node.sourceObservationIds ?? []) {
+          if (!observationIndex.has(obsId)) {
+            observationIndex.set(obsId, new Set());
+          }
+          observationIndex.get(obsId)!.add(node.id);
+        }
       }
       const BATCH_SIZE = 100;
       for (let i = 0; i < liveNodes.length; i += BATCH_SIZE) {
@@ -1179,6 +1416,7 @@ export function registerGraphFunction(
           ),
         );
       }
+      await writeGraphObservationIndex(kv, observationIndex);
 
       const snap = buildSnapshotFromArrays(nodes, edges);
       await kv.set(KV.graphSnapshot, SNAPSHOT_KEY, snap);

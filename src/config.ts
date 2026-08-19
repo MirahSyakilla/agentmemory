@@ -638,6 +638,23 @@ export function isSmartSearchGraphEnabled(): boolean {
   return true;
 }
 
+const GRAPH_SEARCH_TIMEOUT_DEFAULT_MS = 200;
+const GRAPH_SEARCH_TIMEOUT_MIN_MS = 100;
+const GRAPH_SEARCH_TIMEOUT_MAX_MS = 250;
+
+// Graph enrichment is optional. Keep its request budget bounded so a slow
+// graph backend can never turn a normal search into an unbounded wait.
+export function getGraphSearchTimeoutMs(): number {
+  const configured = safeParseInt(
+    getMergedEnv()["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"],
+    GRAPH_SEARCH_TIMEOUT_DEFAULT_MS,
+  );
+  return Math.min(
+    GRAPH_SEARCH_TIMEOUT_MAX_MS,
+    Math.max(GRAPH_SEARCH_TIMEOUT_MIN_MS, configured),
+  );
+}
+
 export function getGraphBatchSize(): number {
   return safeParseInt(getMergedEnv()["GRAPH_EXTRACTION_BATCH_SIZE"], 10);
 }

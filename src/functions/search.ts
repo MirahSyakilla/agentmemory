@@ -11,6 +11,7 @@ import { memoryToObservation } from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { retrievalResultMetadata } from "./retrieval-metadata.js";
 
 let index: SearchIndex | null = null
 let lexicalStore: LexicalStore | null = null
@@ -718,34 +719,62 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // KV.memories when the observation lookup misses — entries indexed
       // via mem::remember live in the memories scope under a synthetic
       // sessionId, so the observation key never exists (#265).
-      const obsResults = await Promise.all(
-        candidates.map(async (r) => {
-          if (r.observation) return r.observation
-          const obs = await kv
-            .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
-            .catch(() => null)
-          if (obs) return obs
-          const mem = await kv
-            .get<Memory>(KV.memories, r.obsId)
-            .catch(() => null)
-          return mem ? memoryToObservation(mem) : null
-        })
-      )
+       const obsResults: Array<{
+         observation: CompressedObservation;
+         evidenceIds?: string[];
+         origin?: CompressedObservation["origin"];
+       } | null> = await Promise.all(
+         candidates.map(async (r) => {
+           if (r.observation) {
+             const mem = await kv.get<Memory>(KV.memories, r.obsId).catch(() => null)
+             return {
+               observation: r.observation,
+               ...(mem
+                 ? { evidenceIds: mem.evidenceIds, origin: mem.origin }
+                 : {}),
+             }
+           }
+           const obs = await kv
+             .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
+             .catch(() => null)
+           if (obs) return { observation: obs }
+           const mem = await kv
+             .get<Memory>(KV.memories, r.obsId)
+             .catch(() => null)
+           return mem
+             ? {
+                 observation: memoryToObservation(mem),
+                 evidenceIds: mem.evidenceIds,
+                 origin: mem.origin,
+               }
+             : null
+         })
+       )
       const enriched: SearchResult[] = []
       for (let i = 0; i < candidates.length; i++) {
-        const obs = obsResults[i]
-        if (!obs) continue
+         const loaded = obsResults[i]
+         if (!loaded) continue
+         const obs = loaded.observation
         // #817: enforce agent-scope after the observation/memory is
         // loaded. The BM25 index doesn't carry agentId so the filter
         // happens post-lookup. Wildcard ("*") and no-isolation paths
         // resolved filterAgentId=undefined upstream and pass through.
         if (filterAgentId !== undefined && obs.agentId !== filterAgentId) continue
         if (enriched.length >= effectiveLimit) break
-        enriched.push({
-          observation: obs,
-          score: candidates[i].score,
-          sessionId: candidates[i].sessionId,
-        })
+         const metadata = await retrievalResultMetadata(kv, {
+           origin: loaded.origin ?? obs.origin,
+           evidenceIds: loaded.evidenceIds,
+           scope: {
+             ...(projectFilter ? { project: projectFilter } : {}),
+             ...(filterAgentId ? { agentId: filterAgentId } : {}),
+           },
+         })
+         enriched.push({
+           observation: obs,
+           score: candidates[i].score,
+           sessionId: candidates[i].sessionId,
+           ...(metadata ? { metadata } : {}),
+         })
       }
 
       void recordAccessBatch(
@@ -781,9 +810,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           sessionId: r.sessionId,
           title: r.observation.title,
           type: r.observation.type,
-          score: r.score,
-          timestamp: r.observation.timestamp,
-        }))
+           score: r.score,
+           timestamp: r.observation.timestamp,
+           ...(r.metadata ? { metadata: r.metadata } : {}),
+         }))
         const packed = applyTokenBudget(compactResults)
         return {
           format,
@@ -800,9 +830,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           sessionId: r.sessionId,
           title: r.observation.title,
           narrative: r.observation.narrative,
-          score: r.score,
-          timestamp: r.observation.timestamp,
-        }))
+           score: r.score,
+           timestamp: r.observation.timestamp,
+           ...(r.metadata ? { metadata: r.metadata } : {}),
+         }))
         const packed = applyTokenBudget(narrativeResults)
         const text = packed.items
           .map((r, index) => `${index + 1}. ${r.title}\n${r.narrative}`)

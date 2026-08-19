@@ -22,6 +22,19 @@ function resolveProject(cwd) {
 	} catch {}
 	return basename(dir);
 }
+function hookAgentId(data) {
+	const values = data ? [
+		data.agentId,
+		data.agent_id,
+		data.agentName,
+		data.agent_name
+	] : [];
+	values.push(process.env["AGENT_ID"]);
+	for (const value of values) if (typeof value === "string" && value.trim()) return value.trim().slice(0, 128);
+	if (process.env["OPENCODE"] === "1") return "opencode";
+	if (process.env["CODEX_THREAD_ID"]) return "codex";
+	if (process.env["CLAUDE_PROJECT_DIR"]) return "claude-code";
+}
 //#endregion
 //#region src/hooks/_env.ts
 const HOOK_ENV_KEYS = new Set([
@@ -29,6 +42,8 @@ const HOOK_ENV_KEYS = new Set([
 	"AGENTMEMORY_SECRET",
 	"AGENTMEMORY_INJECT_CONTEXT",
 	"AGENTMEMORY_PROJECT_NAME",
+	"AGENT_ID",
+	"AGENTMEMORY_AGENT_SCOPE",
 	"CLAUDE_MEMORY_BRIDGE"
 ]);
 let hookEnvLoaded = false;
@@ -150,6 +165,7 @@ async function main() {
 	const rawSessionId = data.session_id || data.sessionId || data.conversation_id;
 	const sessionId = typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : "unknown";
 	const project = typeof data.project === "string" && data.project.trim().length > 0 ? data.project.trim() : resolveProject(data.cwd);
+	const agentId = hookAgentId(data);
 	try {
 		const res = await fetch(`${REST_URL}/agentmemory/enrich`, {
 			method: "POST",
@@ -159,7 +175,8 @@ async function main() {
 				files: uniqueFiles,
 				terms,
 				toolName,
-				...project !== void 0 && { project }
+				...project !== void 0 && { project },
+				...agentId ? { agentId } : {}
 			}),
 			signal: AbortSignal.timeout(2e3)
 		});

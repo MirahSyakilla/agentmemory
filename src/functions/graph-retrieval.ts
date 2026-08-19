@@ -15,6 +15,19 @@ export interface GraphRetrievalResult {
   pathLength: number;
 }
 
+export interface GraphRetrievalOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("Graph retrieval aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
 function buildGraphContext(
   path: Array<{ node: GraphNode; edge?: GraphEdge }>,
 ): string {
@@ -46,150 +59,256 @@ export class GraphRetrieval {
   constructor(private kv: StateKV) {}
 
   private sessionIdFromNode(node: GraphNode, obsId: string): string | undefined {
-    const idx = node.sourceObservationIds.indexOf(obsId);
+    const idx = (node.sourceObservationIds ?? []).indexOf(obsId);
     return node.sourceSessionIds?.[idx] || node.sourceSessionIds?.[0];
   }
 
-  private async loadObservationSessionIndex(): Promise<Map<string, string | null>> {
+  private async loadObservationSessionIndex(
+    options: GraphRetrievalOptions = {},
+  ): Promise<Map<string, string | null>> {
     if (this.obsSessionCache) return this.obsSessionCache;
     const cache = new Map<string, string | null>();
-    this.obsSessionCache = cache;
-    const sessions = await this.kv.list<Session>(KV.sessions).catch(() => []);
+    const sessions = await this.listState<Session>(KV.sessions, options).catch(() => []);
+    throwIfAborted(options.signal);
     await Promise.all(
       sessions.map(async (session) => {
-        const observations = await this.kv
-          .list<CompressedObservation>(KV.observations(session.id))
+        const observations = await this.listState<CompressedObservation>(
+          KV.observations(session.id),
+          options,
+        )
           .catch(() => []);
         for (const obs of observations) {
           cache.set(obs.id, obs.sessionId || session.id);
         }
       }),
     );
+    throwIfAborted(options.signal);
+    this.obsSessionCache = cache;
     return cache;
   }
 
-  private async resolveSessionId(node: GraphNode, obsId: string): Promise<string> {
+  private async resolveSessionId(
+    node: GraphNode,
+    obsId: string,
+    options: GraphRetrievalOptions = {},
+  ): Promise<string> {
     const direct = this.sessionIdFromNode(node, obsId);
     if (direct) return direct;
-    const sessionIndex = await this.loadObservationSessionIndex();
+    const sessionIndex = await this.loadObservationSessionIndex(options);
     return sessionIndex.get(obsId) ?? "";
+  }
+
+  private async resultFor(
+    node: GraphNode,
+    obsId: string,
+    score: number,
+    graphContext: string,
+    pathLength: number,
+    options: GraphRetrievalOptions,
+  ): Promise<GraphRetrievalResult> {
+    return {
+      obsId,
+      sessionId: await this.resolveSessionId(node, obsId, options),
+      score,
+      graphContext,
+      pathLength,
+    };
   }
 
   async searchByEntities(
     entityNames: string[],
     maxDepth = 2,
     maxResults = 20,
+    options: GraphRetrievalOptions = {},
   ): Promise<GraphRetrievalResult[]> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
-
-    const matchingNodes = allNodes.filter((n) => {
-      const nameLower = n.name.toLowerCase();
-      return entityNames.some(
-        (e) =>
-          nameLower.includes(e.toLowerCase()) ||
-          e.toLowerCase().includes(nameLower),
-      );
-    });
-
-    if (matchingNodes.length === 0) return [];
-
-    const results: GraphRetrievalResult[] = [];
-    const visitedObs = new Set<string>();
-
-    for (const startNode of matchingNodes) {
-      const paths = this.dijkstraTraversal(
-        startNode,
-        allNodes,
-        allEdges,
-        maxDepth,
-      );
-
-      for (const path of paths) {
-        const lastNode = path[path.length - 1].node;
-        for (const obsId of lastNode.sourceObservationIds) {
-          if (visitedObs.has(obsId)) continue;
-          visitedObs.add(obsId);
-          const sessionId = await this.resolveSessionId(lastNode, obsId);
-
-          const pathLength = path.length;
-          const edgeWeights = path
-            .filter((s) => s.edge)
-            .map((s) => s.edge!.weight);
-          const avgWeight =
-            edgeWeights.length > 0
-              ? edgeWeights.reduce((a, b) => a + b, 0) / edgeWeights.length
-              : 0.5;
-          const score = avgWeight * (1 / pathLength);
-
-          results.push({
-            obsId,
-            sessionId,
-            score,
-            graphContext: buildGraphContext(path),
-            pathLength,
-          });
-        }
-      }
-
-      for (const obsId of startNode.sourceObservationIds) {
-        if (visitedObs.has(obsId)) continue;
-        visitedObs.add(obsId);
-        const sessionId = await this.resolveSessionId(startNode, obsId);
-        results.push({
-          obsId,
-          sessionId,
-          score: 1.0,
-          graphContext: `[${startNode.type}] ${startNode.name}`,
-          pathLength: 0,
-        });
-      }
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, maxResults);
+    return this.searchByEntitiesTargeted(
+      entityNames,
+      maxDepth,
+      maxResults,
+      options,
+    );
   }
 
   async expandFromChunks(
     obsIds: string[],
     maxDepth = 1,
     maxResults = 10,
+    options: GraphRetrievalOptions = {},
   ): Promise<GraphRetrievalResult[]> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
-
-    const linkedNodes = allNodes.filter((n) =>
-      n.sourceObservationIds.some((id) => obsIds.includes(id)),
+    return this.expandFromChunksTargeted(
+      obsIds,
+      maxDepth,
+      maxResults,
+      options,
     );
+  }
 
+  private async listState<T>(
+    scope: string,
+    options: GraphRetrievalOptions,
+  ): Promise<T[]> {
+    if (
+      typeof options.timeoutMs === "number" &&
+      typeof this.kv.listWithTimeout === "function"
+    ) {
+      return this.kv.listWithTimeout<T>(
+        scope,
+        options.timeoutMs,
+        options.signal,
+      );
+    }
+    return this.kv.list<T>(scope);
+  }
+
+  private async searchByEntitiesTargeted(
+    entityNames: string[],
+    maxDepth: number,
+    maxResults: number,
+    options: GraphRetrievalOptions,
+  ): Promise<GraphRetrievalResult[]> {
+    if (
+      typeof this.kv.findGraphNodesByNames !== "function" ||
+      typeof this.kv.getGraphNeighborhood !== "function"
+    ) {
+      return [];
+    }
+    const nodes = await this.kv.findGraphNodesByNames(
+      entityNames,
+      Math.max(maxResults * 2, 20),
+      options,
+    );
+    if (nodes === null) return [];
+    throwIfAborted(options.signal);
+    if (nodes.length === 0) return [];
+
+    const neighborhood = await this.kv.getGraphNeighborhood(
+      nodes.map((node) => node.id),
+      maxDepth,
+      Math.max(maxResults * 8, 100),
+      options,
+    );
+    if (neighborhood === null) return [];
+    return this.rankGraphResults(
+      nodes,
+      neighborhood.nodes,
+      neighborhood.edges,
+      maxDepth,
+      maxResults,
+      "entity",
+      options,
+    );
+  }
+
+  private async expandFromChunksTargeted(
+    obsIds: string[],
+    maxDepth: number,
+    maxResults: number,
+    options: GraphRetrievalOptions,
+  ): Promise<GraphRetrievalResult[]> {
+    if (
+      typeof this.kv.findGraphNodesByObservationIds !== "function" ||
+      typeof this.kv.getGraphNeighborhood !== "function"
+    ) {
+      return [];
+    }
+    const linkedNodes = await this.kv.findGraphNodesByObservationIds(
+      obsIds,
+      Math.max(maxResults * 2, 20),
+      options,
+    );
+    if (linkedNodes === null) return [];
+    throwIfAborted(options.signal);
+    if (linkedNodes.length === 0) return [];
+    const neighborhood = await this.kv.getGraphNeighborhood(
+      linkedNodes.map((node) => node.id),
+      maxDepth,
+      Math.max(maxResults * 8, 100),
+      options,
+    );
+    if (neighborhood === null) return [];
+    return this.rankGraphResults(
+      linkedNodes,
+      neighborhood.nodes,
+      neighborhood.edges,
+      maxDepth,
+      maxResults,
+      "expansion",
+      options,
+      new Set(obsIds),
+    );
+  }
+
+  private async rankGraphResults(
+    startNodes: GraphNode[],
+    allNodes: GraphNode[],
+    allEdges: GraphEdge[],
+    maxDepth: number,
+    maxResults: number,
+    mode: "entity" | "expansion",
+    options: GraphRetrievalOptions,
+    initiallyVisited = new Set<string>(),
+  ): Promise<GraphRetrievalResult[]> {
+    const nodeMap = new Map(allNodes.map((node) => [node.id, node]));
     const results: GraphRetrievalResult[] = [];
-    const visitedObs = new Set<string>(obsIds);
-
-    for (const node of linkedNodes) {
-      const paths = this.dijkstraTraversal(node, allNodes, allEdges, maxDepth);
+    const visitedObs = initiallyVisited;
+    for (const startNode of startNodes) {
+      throwIfAborted(options.signal);
+      const actualStart = nodeMap.get(startNode.id) ?? startNode;
+      const paths = this.dijkstraTraversal(actualStart, allNodes, allEdges, maxDepth);
       for (const path of paths) {
+        throwIfAborted(options.signal);
         const lastNode = path[path.length - 1].node;
-        for (const obsId of lastNode.sourceObservationIds) {
+        for (const obsId of lastNode.sourceObservationIds ?? []) {
+          throwIfAborted(options.signal);
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
-          const sessionId = await this.resolveSessionId(lastNode, obsId);
-
-          const pathLength = path.length;
-          const score = 0.5 * (1 / (pathLength + 1));
-
-          results.push({
-            obsId,
-            sessionId,
-            score,
-            graphContext: buildGraphContext(path),
-            pathLength,
-          });
+          results.push(
+            await this.resultFor(
+              lastNode,
+              obsId,
+              this.scorePath(path, mode),
+              buildGraphContext(path),
+              path.length,
+              options,
+            ),
+          );
+        }
+      }
+      if (mode === "entity") {
+        for (const obsId of actualStart.sourceObservationIds ?? []) {
+          throwIfAborted(options.signal);
+          if (visitedObs.has(obsId)) continue;
+          visitedObs.add(obsId);
+          results.push(
+            await this.resultFor(
+              actualStart,
+              obsId,
+              1,
+              `[${actualStart.type}] ${actualStart.name}`,
+              0,
+              options,
+            ),
+          );
         }
       }
     }
-
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, maxResults);
+  }
+
+  private scorePath(
+    path: Array<{ node: GraphNode; edge?: GraphEdge }>,
+    mode: "entity" | "expansion",
+  ): number {
+    if (mode === "expansion") return 0.5 * (1 / (path.length + 1));
+    const weights = path
+      .filter((step) => step.edge)
+      .map((step) => step.edge!.weight);
+    const averageWeight =
+      weights.length > 0
+        ? weights.reduce((sum, weight) => sum + weight, 0) / weights.length
+        : 0.5;
+    return averageWeight * (1 / path.length);
   }
 
   async temporalQuery(

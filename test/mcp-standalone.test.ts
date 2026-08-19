@@ -55,7 +55,7 @@ const fetchTrap = vi.fn(async (url: unknown) => {
 describe("Tools Registry", () => {
   it("getAllTools returns all tools with unique names", () => {
     const tools = getAllTools();
-    expect(tools.length).toBeGreaterThanOrEqual(41);
+    expect(tools.length).toBe(74);
     const names = new Set(tools.map((t) => t.name));
     expect(names.size).toBe(tools.length);
     for (const required of [
@@ -67,6 +67,9 @@ describe("Tools Registry", () => {
       "memory_recall",
     ]) {
       expect(tools.some((t) => t.name === required)).toBe(true);
+    }
+    for (const name of ["memory_recall", "memory_smart_search"]) {
+      expect(tools.find((tool) => tool.name === name)?.inputSchema.properties).toHaveProperty("agentId");
     }
   });
 

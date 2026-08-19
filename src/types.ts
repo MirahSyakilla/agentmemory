@@ -36,6 +36,230 @@ export interface Origin {
   capturedAt: string;
 }
 
+export interface RetrievalOriginSummary {
+  channel: Origin["channel"];
+  capturedAt: string;
+  detail?: string;
+}
+
+export interface RetrievalEvidenceReference {
+  id: string;
+  kind: string;
+  source?: string;
+  locator?: string;
+  claim?: string;
+  capturedAt?: string;
+  verifiedAt?: string;
+  verificationMethod?: string;
+}
+
+export interface RetrievalEvidenceSummary {
+  ids: string[];
+  summaries: RetrievalEvidenceReference[];
+  truncated?: true;
+}
+
+export interface RetrievalResultMetadata {
+  origin?: RetrievalOriginSummary;
+  evidence?: RetrievalEvidenceSummary;
+}
+
+export type KnowledgeLayer =
+  | "knowledge"
+  | "experience"
+  | "decision"
+  | "hypothesis"
+  | "artifact"
+  | "procedure"
+  | "working"
+  | "episodic"
+  | "semantic"
+  | "procedural";
+
+export type EpistemicState =
+  | "hypothesis"
+  | "observed"
+  | "verified"
+  | "disproven"
+  | "superseded"
+  | "uncertain";
+
+export interface TemporalValidity {
+  observedAt?: string;
+  validFrom?: string;
+  validUntil?: string;
+  validTo?: string;
+  verifiedAt?: string;
+  supersededAt?: string;
+  sourceRevision?: string;
+}
+
+export interface Authority {
+  kind?: string;
+  source?: "user" | "verified_evidence" | "tool" | "agent" | "import" | "shared";
+  score?: number;
+  confidence?: number;
+  weight?: number;
+  level?: string;
+  detail?: string;
+  reason?: string;
+  rationale?: string;
+}
+
+export interface EvidenceProvenance extends Origin {
+  source?: string;
+  sourceId?: string;
+  sourceType?: string;
+}
+
+export interface Evidence {
+  id: string;
+  kind: string;
+  type: string;
+  source?: string;
+  locator?: string;
+  content?: string;
+  claim?: string;
+  artifactId?: string;
+  experimentId?: string;
+  sourceIds: string[];
+  provenance: EvidenceProvenance;
+  capturedAt: string;
+  createdAt: string;
+  updatedAt?: string;
+  verifiedAt?: string;
+  verifier?: string;
+  verificationMethod?: string;
+  project?: string;
+  agentId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Artifact {
+  id: string;
+  name: string;
+  kind: string;
+  type: string;
+  path?: string;
+  uri?: string;
+  description?: string;
+  digest?: string;
+  hash?: string;
+  size?: number;
+  mediaType?: string;
+  experimentIds: string[];
+  evidenceIds: string[];
+  provenance: EvidenceProvenance;
+  createdAt: string;
+  updatedAt: string;
+  project?: string;
+  agentId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type ExperimentStatus =
+  | "planned"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface Experiment {
+  id: string;
+  title?: string;
+  objective: string;
+  hypothesis?: string;
+  environment?: string;
+  sourceRevision?: string;
+  revision?: string;
+  toolchain?: string;
+  commands: string[];
+  inputs: unknown[];
+  artifactIds: string[];
+  artifacts?: string[];
+  observationIds: string[];
+  observations?: string[];
+  evidenceIds: string[];
+  actionIds?: string[];
+  sessionIds?: string[];
+  graphNodeIds?: string[];
+  negativeMemoryIds?: string[];
+  result?: unknown;
+  conclusion?: string;
+  followUp: string[];
+  status: ExperimentStatus;
+  provenance: EvidenceProvenance;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  project?: string;
+  agentId?: string;
+  authority?: Authority;
+  metadata?: Record<string, unknown>;
+}
+
+export type NegativeMemoryStatus = "failed" | "invalid" | "disproven" | "superseded";
+
+export interface NegativeMemory {
+  id: string;
+  approach: string;
+  statement: string;
+  reason: string;
+  outcome?: string;
+  status: NegativeMemoryStatus;
+  experimentIds: string[];
+  evidenceIds: string[];
+  environment?: string;
+  sourceRevision?: string;
+  validFrom?: string;
+  validUntil?: string;
+  confidence: number;
+  provenance: EvidenceProvenance;
+  createdAt: string;
+  updatedAt: string;
+  project?: string;
+  agentId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type ConflictStatus =
+  | "open"
+  | "resolved"
+  | "rejected"
+  | "dismissed"
+  | "inconclusive";
+
+export interface MemoryConflict {
+  id: string;
+  memoryIds: [string, string];
+  sourceId?: string;
+  targetId?: string;
+  status: ConflictStatus;
+  createdAt: string;
+  updatedAt: string;
+  detectedBy: "relation" | "retrieval" | "manual";
+  evidenceIds?: string[];
+  artifactIds?: string[];
+  experimentIds?: string[];
+  resolution?: Record<string, unknown>;
+  resolutionEvidenceIds?: string[];
+  resolvedBy?: string;
+  project?: string;
+  agentId?: string;
+}
+
+export interface RequestLedgerEntry {
+  id: string;
+  operation: string;
+  resourceId: string;
+  status: "claimed" | "completed";
+  createdAt: string;
+  completedAt?: string;
+  project?: string;
+  agentId?: string;
+}
+
 export function importOrigin(
   existing: Origin | undefined,
   capturedAt: string,
@@ -123,6 +347,14 @@ export interface Memory {
   agentId?: string;
   project?: string;
   origin?: Origin;
+  layer?: KnowledgeLayer;
+  epistemicState?: EpistemicState;
+  temporal?: TemporalValidity;
+  authority?: Authority;
+  evidenceIds?: string[];
+  artifactIds?: string[];
+  experimentIds?: string[];
+  conflictIds?: string[];
 }
 
 export interface SessionSummary {
@@ -158,6 +390,7 @@ export interface HookPayload {
   cwd: string;
   timestamp: string;
   data: unknown;
+  agentId?: string;
 }
 
 export interface ProviderConfig {
@@ -192,6 +425,7 @@ export interface SearchResult {
   observation: CompressedObservation;
   score: number;
   sessionId: string;
+  metadata?: RetrievalResultMetadata;
 }
 
 export interface ContextBlock {
@@ -395,6 +629,17 @@ export interface CompactSearchResult {
   type: ObservationType;
   score: number;
   timestamp: string;
+  metadata?: RetrievalResultMetadata;
+}
+
+export interface NarrativeSearchResult {
+  obsId: string;
+  sessionId: string;
+  title: string;
+  narrative: string;
+  score: number;
+  timestamp: string;
+  metadata?: RetrievalResultMetadata;
 }
 
 export interface CompactLessonResult {
@@ -457,6 +702,11 @@ export interface ExportData {
   lessons?: Lesson[];
   insights?: Insight[];
   accessLogs?: AccessLogExport[];
+  evidence?: Evidence[];
+  artifacts?: Artifact[];
+  experiments?: Experiment[];
+  negativeMemories?: NegativeMemory[];
+  conflicts?: MemoryConflict[];
   pagination?: ExportPagination;
 }
 
@@ -619,6 +869,17 @@ export interface GraphSnapshot {
   resetAt?: string;
 }
 
+export interface GraphObservationIndexBackfillState {
+  version: 1;
+  cursor: string;
+  processedNodes: number;
+  processedObservationEntries: number;
+  indexedReferences: number;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
 export type ConsolidationTier =
   | "working"
   | "episodic"
@@ -704,6 +965,7 @@ export interface AuditEntry {
     | "action_update"
     | "lease_acquire"
     | "lease_release"
+    | "lease_renew"
     | "routine_run"
     | "signal_send"
     | "checkpoint_resolve"
@@ -739,7 +1001,16 @@ export interface AuditEntry {
     | "slot_delete"
     | "slot_reflect"
     | "session_finalize"
-    | "context_reduction_record";
+    | "context_reduction_record"
+    | "evidence_write"
+    | "artifact_write"
+    | "experiment_write"
+    | "negative_memory_write"
+    | "conflict_create"
+    | "conflict_resolve"
+    | "memory_state_update"
+    | "retrieval_plan"
+    | "graph_backfill";
   userId?: string;
   functionId: string;
   targetIds: string[];
@@ -1079,3 +1350,35 @@ export interface StateScope {
 }
 
 export type StateScopeKey = keyof StateScope;
+
+export interface EvidenceScope {
+  [id: string]: Evidence;
+}
+
+export interface ArtifactScope {
+  [id: string]: Artifact;
+}
+
+export interface ExperimentScope {
+  [id: string]: Experiment;
+}
+
+export interface NegativeMemoryScope {
+  [id: string]: NegativeMemory;
+}
+
+export interface ConflictScope {
+  [id: string]: MemoryConflict;
+}
+
+export interface RequestLedgerScope {
+  [id: string]: RequestLedgerEntry;
+}
+
+export interface GraphObservationIndexScope {
+  [observationId: string]: string[];
+}
+
+export interface GraphObservationIndexBackfillScope {
+  current: GraphObservationIndexBackfillState;
+}

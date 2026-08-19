@@ -42,6 +42,24 @@ function parseCsvList(value: unknown): string[] {
   return [];
 }
 
+function selectToolArgs(
+  args: Record<string, unknown>,
+  allowed: readonly string[],
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of allowed) {
+    if (args[field] !== undefined) payload[field] = args[field];
+  }
+  return payload;
+}
+
+function toolTextResponse(result: unknown): McpResponse {
+  return {
+    status_code: 200,
+    body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+  };
+}
+
 function recordMcpContextDelivery(
   sdk: ISdk,
   source: "mcp_recall" | "mcp_smart_search" | "mcp_vision_search",
@@ -137,10 +155,7 @@ export function registerMcpEndpoints(
             // isolation filter smart-search uses. Default behavior is
             // unchanged (no agentId → falls back to env AGENT_ID when
             // AGENTMEMORY_AGENT_SCOPE=isolated; "*" wildcard bypasses).
-            const recallAgentId =
-              typeof args.agentId === "string" && args.agentId.trim().length > 0
-                ? (args.agentId as string).trim()
-                : undefined;
+            const recallAgentId = asNonEmptyString(args.agentId);
             const project = asNonEmptyString(args.project);
             const result = await sdk.trigger({ function_id: "mem::search", payload: {
               query: args.query,
@@ -213,6 +228,18 @@ export function registerMcpEndpoints(
               typeof args.agentId === "string" && args.agentId.trim().length > 0
                 ? (args.agentId as string).trim()
                 : undefined;
+            const temporal =
+              args.temporal !== null &&
+              typeof args.temporal === "object" &&
+              !Array.isArray(args.temporal)
+                ? args.temporal
+                : undefined;
+            const authority =
+              args.authority !== null &&
+              typeof args.authority === "object" &&
+              !Array.isArray(args.authority)
+                ? args.authority
+                : undefined;
 
             const result = await sdk.trigger({ function_id: "mem::remember", payload: {
               content: args.content,
@@ -221,6 +248,21 @@ export function registerMcpEndpoints(
               files,
               ...(project !== undefined && { project }),
               ...(saveAgentId !== undefined && { agentId: saveAgentId }),
+              ...(typeof args.layer === "string" && { layer: args.layer }),
+              ...(typeof args.epistemicState === "string" && {
+                epistemicState: args.epistemicState,
+              }),
+              ...(temporal !== undefined ? { temporal } : {}),
+              ...(authority !== undefined ? { authority } : {}),
+              ...(Array.isArray(args.evidenceIds) && {
+                evidenceIds: args.evidenceIds,
+              }),
+              ...(Array.isArray(args.artifactIds) && {
+                artifactIds: args.artifactIds,
+              }),
+              ...(Array.isArray(args.experimentIds) && {
+                experimentIds: args.experimentIds,
+              }),
             } });
             return {
               status_code: 200,
@@ -302,6 +344,7 @@ export function registerMcpEndpoints(
             const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
             const project = asNonEmptyString(args.project);
+            const agentId = asNonEmptyString(args.agentId);
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
@@ -309,6 +352,7 @@ export function registerMcpEndpoints(
                 expandIds,
                 limit,
                 ...(project ? { project } : {}),
+                ...(agentId ? { agentId } : {}),
               },
             });
             const text = JSON.stringify(result, null, 2);
@@ -1160,6 +1204,243 @@ export function registerMcpEndpoints(
             }
             const verifyResult = await sdk.trigger({ function_id: "mem::verify", payload: { id: args.id } });
             return { status_code: 200, body: { content: [{ type: "text", text: JSON.stringify(verifyResult, null, 2) }] } };
+          }
+
+          case "memory_retrieval_plan": {
+            const query = asNonEmptyString(args.query);
+            if (!query) return { status_code: 400, body: { error: "query is required" } };
+            if (args.budgets !== undefined && (!args.budgets || typeof args.budgets !== "object" || Array.isArray(args.budgets))) {
+              return { status_code: 400, body: { error: "budgets must be an object" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::retrieval-plan",
+              payload: selectToolArgs(
+                { ...args, query },
+                ["query", "project", "agentId", "limit", "tokenBudget", "budgets"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_retrieval_expand": {
+            const handle = asNonEmptyString(args.handle);
+            if (!handle) return { status_code: 400, body: { error: "handle is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::retrieval-expand",
+              payload: selectToolArgs(
+                { ...args, handle },
+                ["handle", "project", "agentId", "tokenBudget"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_evidence_save": {
+            const kind = asNonEmptyString(args.kind);
+            if (!kind || !args.provenance || typeof args.provenance !== "object" || Array.isArray(args.provenance)) {
+              return { status_code: 400, body: { error: "kind and provenance object are required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::evidence-write",
+              payload: selectToolArgs(
+                { ...args, kind },
+                ["id", "kind", "type", "source", "locator", "content", "claim", "artifactId", "experimentId", "sourceIds", "provenance", "verifiedAt", "verifier", "verificationMethod", "metadata", "project", "agentId", "idempotencyKey"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_evidence_search": {
+            const query = asNonEmptyString(args.query);
+            if (!query) return { status_code: 400, body: { error: "query is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::evidence-query",
+              payload: selectToolArgs({ ...args, query }, ["query", "kind", "type", "project", "agentId", "limit"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_evidence_get": {
+            const id = asNonEmptyString(args.id);
+            if (!id) return { status_code: 400, body: { error: "id is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::evidence-get",
+              payload: selectToolArgs({ ...args, id }, ["id", "project", "agentId"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_evidence_verify": {
+            const id = asNonEmptyString(args.id);
+            const verifier = asNonEmptyString(args.verifier);
+            const verificationMethod = asNonEmptyString(args.verificationMethod);
+            if (!id || !verifier || !verificationMethod) {
+              return { status_code: 400, body: { error: "id, verifier, and verificationMethod are required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::evidence-verify",
+              payload: selectToolArgs(
+                { ...args, id, verifier, verificationMethod },
+                ["id", "verifier", "verificationMethod", "verifiedAt", "result", "project", "agentId"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_artifact_save": {
+            const name = asNonEmptyString(args.name);
+            if (!name || !args.provenance || typeof args.provenance !== "object" || Array.isArray(args.provenance)) {
+              return { status_code: 400, body: { error: "name and provenance object are required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::artifact-write",
+              payload: selectToolArgs(
+                { ...args, name },
+                ["id", "name", "kind", "type", "path", "uri", "description", "digest", "hash", "size", "mediaType", "experimentIds", "evidenceIds", "provenance", "metadata", "project", "agentId", "idempotencyKey"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_artifact_search": {
+            const query = asNonEmptyString(args.query);
+            if (!query) return { status_code: 400, body: { error: "query is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::artifact-query",
+              payload: selectToolArgs({ ...args, query }, ["query", "kind", "type", "project", "agentId", "limit"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_artifact_get": {
+            const id = asNonEmptyString(args.id);
+            if (!id) return { status_code: 400, body: { error: "id is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::artifact-get",
+              payload: selectToolArgs({ ...args, id }, ["id", "project", "agentId"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_experiment_create": {
+            const objective = asNonEmptyString(args.objective);
+            if (!objective || !args.provenance || typeof args.provenance !== "object" || Array.isArray(args.provenance)) {
+              return { status_code: 400, body: { error: "objective and provenance object are required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::experiment-create",
+              payload: selectToolArgs(
+                { ...args, objective },
+                ["id", "title", "objective", "hypothesis", "environment", "sourceRevision", "revision", "toolchain", "commands", "inputs", "artifactIds", "observationIds", "evidenceIds", "actionIds", "sessionIds", "graphNodeIds", "negativeMemoryIds", "result", "conclusion", "followUp", "status", "provenance", "authority", "startedAt", "completedAt", "metadata", "project", "agentId", "idempotencyKey"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_experiment_update": {
+            const id = asNonEmptyString(args.id);
+            if (!id) return { status_code: 400, body: { error: "id is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::experiment-update",
+              payload: selectToolArgs(
+                { ...args, id },
+                ["id", "title", "objective", "hypothesis", "environment", "sourceRevision", "revision", "toolchain", "commands", "inputs", "artifactIds", "observationIds", "evidenceIds", "actionIds", "sessionIds", "graphNodeIds", "negativeMemoryIds", "result", "conclusion", "followUp", "status", "provenance", "authority", "startedAt", "completedAt", "metadata", "project", "agentId"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_experiment_get":
+          case "memory_experiment_expand": {
+            const id = asNonEmptyString(args.id);
+            if (!id) return { status_code: 400, body: { error: "id is required" } };
+            const result = await sdk.trigger({
+              function_id: name === "memory_experiment_expand" ? "mem::experiment-expand" : "mem::experiment-get",
+              payload: selectToolArgs({ ...args, id }, ["id", "project", "agentId"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_experiment_list": {
+            const result = await sdk.trigger({
+              function_id: "mem::experiment-list",
+              payload: selectToolArgs(args, ["status", "project", "agentId", "limit"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_experiment_search": {
+            const query = asNonEmptyString(args.query);
+            if (!query) return { status_code: 400, body: { error: "query is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::experiment-query",
+              payload: selectToolArgs({ ...args, query }, ["query", "status", "project", "agentId", "limit"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_negative_memory_save": {
+            const approach = asNonEmptyString(args.approach);
+            const reason = asNonEmptyString(args.reason);
+            if (!approach || !reason || !args.provenance || typeof args.provenance !== "object" || Array.isArray(args.provenance)) {
+              return { status_code: 400, body: { error: "approach, reason, and provenance object are required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::negative-memory-write",
+              payload: selectToolArgs(
+                { ...args, approach, reason },
+                ["id", "approach", "statement", "reason", "outcome", "status", "experimentIds", "evidenceIds", "environment", "sourceRevision", "validFrom", "validUntil", "confidence", "provenance", "metadata", "project", "agentId", "idempotencyKey"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_negative_memory_lookup": {
+            const query = asNonEmptyString(args.query);
+            if (!query) return { status_code: 400, body: { error: "query is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::negative-memory-lookup",
+              payload: selectToolArgs(
+                { ...args, query },
+                ["query", "environment", "sourceRevision", "asOf", "project", "agentId", "limit", "includeSuperseded", "includeExpired"],
+              ),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_temporal_query": {
+            const result = await sdk.trigger({
+              function_id: "mem::temporal-memory-query",
+              payload: selectToolArgs(args, ["id", "mode", "asOf", "from", "to", "range", "includeHistory", "project", "agentId"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_temporal_graph_query": {
+            const entityName = asNonEmptyString(args.entityName);
+            if (!entityName) return { status_code: 400, body: { error: "entityName is required" } };
+            const result = await sdk.trigger({
+              function_id: "mem::temporal-query",
+              payload: selectToolArgs({ ...args, entityName }, ["entityName", "asOf", "includeHistory"]),
+            });
+            return toolTextResponse(result);
+          }
+
+          case "memory_conflict_resolve": {
+            const conflictId = asNonEmptyString(args.conflictId);
+            const status = asNonEmptyString(args.status);
+            if (!conflictId || !status) return { status_code: 400, body: { error: "conflictId and status are required" } };
+            if (args.memoryStates !== undefined && (!args.memoryStates || typeof args.memoryStates !== "object" || Array.isArray(args.memoryStates))) {
+              return { status_code: 400, body: { error: "memoryStates must be an object" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::conflict-resolve",
+              payload: selectToolArgs(
+                { ...args, conflictId, status },
+                ["conflictId", "status", "winnerMemoryId", "reason", "resolvedBy", "memoryStates", "resolution"],
+              ),
+            });
+            return toolTextResponse(result);
           }
 
           case "memory_lesson_save": {

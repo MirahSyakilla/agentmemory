@@ -129,6 +129,61 @@ describe("Smart Search Function", () => {
     expect(result.results[0]).not.toHaveProperty("narrative");
   });
 
+  it("returns origin metadata without expanding evidence content", async () => {
+    searchResults[0]!.observation = makeObs({
+      origin: { channel: "user", detail: "task", capturedAt: "2026-02-01T10:00:00Z" },
+    });
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+    })) as { results: CompactSearchResult[] };
+
+    expect(result.results[0]?.metadata?.origin).toEqual({
+      channel: "user",
+      detail: "task",
+      capturedAt: "2026-02-01T10:00:00Z",
+    });
+    expect(result.results[0]).not.toHaveProperty("narrative");
+  });
+
+  it("enforces project scope for compact and expanded results", async () => {
+    const otherObservation = makeObs({
+      id: "obs_other",
+      sessionId: "ses_other",
+      title: "Other project secret",
+    });
+    await kv.set("mem:sessions", "ses_other", {
+      id: "ses_other",
+      project: "other-project",
+      cwd: "/tmp",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_other", otherObservation.id, otherObservation);
+    searchResults = [
+      ...searchResults,
+      {
+        observation: otherObservation,
+        bm25Score: 0.9,
+        vectorScore: 0,
+        combinedScore: 0.9,
+        sessionId: "ses_other",
+      },
+    ];
+
+    const compact = (await sdk.trigger("mem::smart-search", {
+      query: "secret",
+      project: "my-project",
+    })) as { results: CompactSearchResult[] };
+    expect(compact.results.map((result) => result.obsId)).not.toContain("obs_other");
+
+    const expanded = (await sdk.trigger("mem::smart-search", {
+      expandIds: ["obs_1", "obs_other"],
+      project: "my-project",
+    })) as { results: Array<{ obsId: string }> };
+    expect(expanded.results.map((result) => result.obsId)).toEqual(["obs_1"]);
+  });
+
   it("expand mode returns full observations for given IDs", async () => {
     const result = (await sdk.trigger("mem::smart-search", {
       expandIds: ["obs_1"],

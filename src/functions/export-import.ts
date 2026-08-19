@@ -21,6 +21,11 @@ import type {
   Facet,
   Lesson,
   Insight,
+  Evidence,
+  Artifact,
+  Experiment,
+  NegativeMemory,
+  MemoryConflict,
   ExportPagination,
   AccessLogExport,
 } from "../types.js";
@@ -34,6 +39,7 @@ import { recordAudit } from "./audit.js";
 import { indexRecords, rebuildIndex } from "./search.js";
 import { resetLessonIndex } from "./lessons.js";
 import { rebuildGraphIndexes } from "./graph.js";
+import { reconcileExperimentLinks } from "./experiment-links.js";
 import { logger } from "../logger.js";
 
 // Bounded-concurrency chunk size for the import delete/write loops. A
@@ -117,6 +123,11 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         signals,
         checkpoints,
         accessLogs,
+        evidence,
+        artifacts,
+        experiments,
+        negativeMemories,
+        conflicts,
       ] = await Promise.all([
         kv.list<GraphNode>(KV.graphNodes).catch(() => []),
         kv.list<GraphEdge>(KV.graphEdges).catch(() => []),
@@ -134,6 +145,11 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         kv.list<Signal>(KV.signals).catch(() => []),
         kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
         kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
+        kv.list<Evidence>(KV.evidence).catch(() => []),
+        kv.list<Artifact>(KV.artifacts).catch(() => []),
+        kv.list<Experiment>(KV.experiments).catch(() => []),
+        kv.list<NegativeMemory>(KV.negativeMemories).catch(() => []),
+        kv.list<MemoryConflict>(KV.conflicts).catch(() => []),
       ]);
 
       const exportData: ExportData = {
@@ -162,6 +178,12 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         signals: signals.length > 0 ? signals : undefined,
         checkpoints: checkpoints.length > 0 ? checkpoints : undefined,
         accessLogs: accessLogs.length > 0 ? accessLogs : undefined,
+        evidence: evidence.length > 0 ? evidence : undefined,
+        artifacts: artifacts.length > 0 ? artifacts : undefined,
+        experiments: experiments.length > 0 ? experiments : undefined,
+        negativeMemories:
+          negativeMemories.length > 0 ? negativeMemories : undefined,
+        conflicts: conflicts.length > 0 ? conflicts : undefined,
       };
 
       if (maxSessions !== undefined) {
@@ -396,6 +418,26 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         await runChunked(
           await kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
           (a) => kv.delete(KV.accessLog, a.memoryId),
+        );
+        await runChunked(
+          await kv.list<Evidence>(KV.evidence).catch(() => []),
+          (e) => kv.delete(KV.evidence, e.id),
+        );
+        await runChunked(
+          await kv.list<Artifact>(KV.artifacts).catch(() => []),
+          (a) => kv.delete(KV.artifacts, a.id),
+        );
+        await runChunked(
+          await kv.list<Experiment>(KV.experiments).catch(() => []),
+          (e) => kv.delete(KV.experiments, e.id),
+        );
+        await runChunked(
+          await kv.list<NegativeMemory>(KV.negativeMemories).catch(() => []),
+          (n) => kv.delete(KV.negativeMemories, n.id),
+        );
+        await runChunked(
+          await kv.list<MemoryConflict>(KV.conflicts).catch(() => []),
+          (c) => kv.delete(KV.conflicts, c.id),
         );
       }
 
@@ -660,6 +702,55 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           }
           await kv.set(KV.accessLog, log.memoryId, log);
         });
+      }
+      if (importData.evidence) {
+        await runChunked(importData.evidence, async (evidence) => {
+          if (strategy === "skip") {
+            const existing = await kv.get(KV.evidence, evidence.id).catch(() => null);
+            if (existing) { stats.skipped++; return; }
+          }
+          await kv.set(KV.evidence, evidence.id, evidence);
+        });
+      }
+      if (importData.artifacts) {
+        await runChunked(importData.artifacts, async (artifact) => {
+          if (strategy === "skip") {
+            const existing = await kv.get(KV.artifacts, artifact.id).catch(() => null);
+            if (existing) { stats.skipped++; return; }
+          }
+          await kv.set(KV.artifacts, artifact.id, artifact);
+        });
+      }
+      if (importData.experiments) {
+        await runChunked(importData.experiments, async (experiment) => {
+          if (strategy === "skip") {
+            const existing = await kv.get(KV.experiments, experiment.id).catch(() => null);
+            if (existing) { stats.skipped++; return; }
+          }
+          await kv.set(KV.experiments, experiment.id, experiment);
+        });
+      }
+      if (importData.negativeMemories) {
+        await runChunked(importData.negativeMemories, async (negativeMemory) => {
+          if (strategy === "skip") {
+            const existing = await kv.get(KV.negativeMemories, negativeMemory.id).catch(() => null);
+            if (existing) { stats.skipped++; return; }
+          }
+          await kv.set(KV.negativeMemories, negativeMemory.id, negativeMemory);
+        });
+      }
+      if (importData.conflicts) {
+        await runChunked(importData.conflicts, async (conflict) => {
+          if (strategy === "skip") {
+            const existing = await kv.get(KV.conflicts, conflict.id).catch(() => null);
+            if (existing) { stats.skipped++; return; }
+          }
+          await kv.set(KV.conflicts, conflict.id, conflict);
+        });
+      }
+
+      if (importData.evidence || importData.artifacts || importData.experiments || importData.negativeMemories) {
+        await reconcileExperimentLinks(kv, { mode: "merge" });
       }
 
       // Imported rows are now in KV but invisible to search: the boot

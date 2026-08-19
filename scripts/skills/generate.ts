@@ -95,9 +95,12 @@ function rest(): string {
     const mm = /http_method:\s*"([A-Z]+)"/.exec(win);
     found.push({ path, method: mm ? mm[1] : "POST" });
   }
+  const helperRe = /registerWhitelisted(Post|Get)\(\s*"[^"]+"\s*,\s*"([^"]+)"/g;
+  while ((m = helperRe.exec(text)) !== null) {
+    found.push({ path: m[2], method: m[1].toUpperCase() });
+  }
   // Dedupe on method+path, not path alone: ten paths register both GET and
-  // POST, and a path-only dedupe hid the second method and undercounted the
-  // surface (119 listed vs 130 registered).
+  // POST, and some paths are registered by the explicit whitelist helpers.
   const seen = new Set<string>();
   const rows = found
     .filter((e) => {

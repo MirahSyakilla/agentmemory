@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "./_env.js";
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
 // .mjs (matches the pattern used by every other hook entry in tsdown.config).
@@ -42,7 +42,7 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId || data.conversation_id) as string) || "unknown";
-  const agentId = data.agent_id || data.agentName;
+  const agentId = hookAgentId(data);
   const agentType = data.agent_type || data.agentDisplayName || data.agentName;
   const cwd = hookCwd(data) || process.cwd();
 
@@ -55,6 +55,7 @@ async function main() {
       project: resolveProject(cwd),
       cwd,
       timestamp: new Date().toISOString(),
+      ...(agentId ? { agentId } : {}),
       data: {
         agent_id: agentId,
         agent_type: agentType,

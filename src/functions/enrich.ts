@@ -22,22 +22,29 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
       sessionId: string;
       files: string[];
       terms?: string[];
-      toolName?: string;
-      project?: string;
+        toolName?: string;
+        project?: string;
+        agentId?: string;
     }) => {
       const project =
         typeof data.project === "string" && data.project.trim().length > 0
           ? data.project.trim()
           : undefined;
+      const agentId =
+        typeof data.agentId === "string" && data.agentId.trim().length > 0
+          ? data.agentId.trim()
+          : undefined;
 
       const parts: string[] = [];
 
       const fileContextPromise = sdk
-        .trigger<{ sessionId: string; files: string[] }, { context: string }>({
+        .trigger<{ sessionId: string; files: string[]; project?: string; agentId?: string }, { context: string }>({
           function_id: "mem::file-context",
           payload: {
             sessionId: data.sessionId,
             files: data.files,
+            ...(project !== undefined && { project }),
+            ...(agentId !== undefined && { agentId }),
           },
         })
         .catch(() => ({ context: "" }));
@@ -51,7 +58,7 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
         searchQueries.length > 0
           ? sdk
               .trigger<
-                { query: string; limit: number; project?: string },
+                { query: string; limit: number; project?: string; agentId?: string },
                 { results: Array<{ observation: { narrative: string } }> }
               >({
                 function_id: "mem::search",
@@ -59,6 +66,7 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
                   query: searchQueries.join(" "),
                   limit: 5,
                   ...(project !== undefined && { project }),
+                  ...(agentId !== undefined && { agentId }),
                 },
               })
               .catch(() => ({ results: [] }))
@@ -74,6 +82,7 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
                 m.isLatest &&
                 // Guard only when both sides have an explicit project; unscoped memories pass through.
                 (!project || !m.project || m.project === project) &&
+                (!agentId || agentId === "*" || !m.agentId || m.agentId === agentId) &&
                 m.files.some((f) =>
                   data.files.some((df) => f.includes(df) || df.includes(f)),
                 ),

@@ -89,7 +89,9 @@ async function main(): Promise<void> {
     console.log(`\n== ${adapter.name} ==`);
     for (const q of questions) {
       const t0 = performance.now();
-      const state = await adapter.init(q.haystack);
+      const state = await adapter.init(q.haystack, {
+        scopeKey: `longmemeval:${q.id}`,
+      });
       try {
         const ranked = await adapter.query(q.question, state, k);
         const latencyMs = performance.now() - t0;

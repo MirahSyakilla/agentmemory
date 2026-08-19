@@ -5,9 +5,16 @@ interface VectorState {
   embeddings: Float32Array[];
 }
 
-const OPENAI_URL = "https://api.openai.com/v1/embeddings";
-const MODEL = "text-embedding-3-small";
-const DIM = 1536;
+function embeddingsUrl(): string {
+  const raw = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const base = /\/v\d+$/.test(raw) ? raw : `${raw}/v1`;
+  return `${base}/embeddings`;
+}
+const OPENAI_URL = embeddingsUrl();
+const MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+const EXPECTED_DIM = process.env.OPENAI_EMBEDDING_DIMENSIONS
+  ? Number(process.env.OPENAI_EMBEDDING_DIMENSIONS)
+  : null;
 
 async function embed(text: string, apiKey: string): Promise<Float32Array> {
   const res = await fetch(OPENAI_URL, {
@@ -89,8 +96,8 @@ export const vectorAdapter: Adapter<VectorState> = {
       );
       for (let j = 0; j < vecs.length; j++) embeddings[i + j] = vecs[j];
     }
-    if (embeddings.length > 0 && embeddings[0].length !== DIM) {
-      throw new Error(`unexpected embedding dim: ${embeddings[0].length}`);
+    if (EXPECTED_DIM && embeddings.length > 0 && embeddings[0].length !== EXPECTED_DIM) {
+      throw new Error(`unexpected embedding dim: ${embeddings[0].length}, expected ${EXPECTED_DIM}`);
     }
     return { sessions, embeddings };
   },

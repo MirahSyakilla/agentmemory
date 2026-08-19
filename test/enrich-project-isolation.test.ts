@@ -231,6 +231,33 @@ describe("mem::enrich — project forwarded to mem::search", () => {
     expect(capturedSearchPayload.project).toBe("api");
   });
 
+  it("forwards agent scope to search and file context", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerEnrichFunction(sdk as never, kv as never);
+
+    let searchPayload: Record<string, unknown> = {};
+    let filePayload: Record<string, unknown> = {};
+    sdk.overrideTrigger("mem::file-context", async (payload: unknown) => {
+      filePayload = payload as Record<string, unknown>;
+      return { context: "" };
+    });
+    sdk.overrideTrigger("mem::search", async (payload: unknown) => {
+      searchPayload = payload as Record<string, unknown>;
+      return { results: [] };
+    });
+
+    await sdk.trigger("mem::enrich", {
+      sessionId: "sess-api-001",
+      files: ["src/middleware/auth.ts"],
+      project: "api",
+      agentId: "opencode",
+    });
+
+    expect(searchPayload).toMatchObject({ project: "api", agentId: "opencode" });
+    expect(filePayload).toMatchObject({ project: "api", agentId: "opencode" });
+  });
+
   it("does not pass project to search when caller provides none", async () => {
     const sdk = mockSdk();
     const kv = mockKV();

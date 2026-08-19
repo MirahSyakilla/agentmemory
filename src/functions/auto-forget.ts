@@ -8,11 +8,11 @@ import { lexicalIndexRemove, vectorIndexRemove, flushIndexSave } from "./search.
 import { logger } from "../logger.js";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const CONTRADICTION_THRESHOLD = 0.9;
+const DUPLICATE_THRESHOLD = 0.9;
 
 interface AutoForgetResult {
   ttlExpired: string[];
-  contradictions: Array<{
+  potentialDuplicates: Array<{
     memoryA: string;
     memoryB: string;
     similarity: number;
@@ -30,7 +30,7 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
 
       const result: AutoForgetResult = {
         ttlExpired: [],
-        contradictions: [],
+        potentialDuplicates: [],
         lowValueObs: [],
         dryRun,
       };
@@ -115,30 +115,14 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
             const sim =
               intersection / (setA.size + setB.size - intersection);
 
-            if (sim > CONTRADICTION_THRESHOLD) {
+            if (sim > DUPLICATE_THRESHOLD) {
               const memA = memById.get(memIds[i])!;
               const memB = memById.get(memIds[j])!;
-              result.contradictions.push({
+              result.potentialDuplicates.push({
                 memoryA: memA.id,
                 memoryB: memB.id,
                 similarity: sim,
               });
-
-              if (!dryRun) {
-                const older =
-                  new Date(memA.createdAt).getTime() <
-                    new Date(memB.createdAt).getTime()
-                    ? memA
-                    : memB;
-                older.isLatest = false;
-                await kv.set(KV.memories, older.id, older);
-                await recordAudit(kv, "forget", "mem::auto-forget", [older.id], {
-                  resource: "memory",
-                  reason: "auto-forget contradiction",
-                  olderId: older.id,
-                  similarity: sim,
-                });
-              }
             }
           }
         }
@@ -196,7 +180,7 @@ export function registerAutoForgetFunction(sdk: ISdk, kv: StateKV): void {
 
       logger.info("Auto-forget complete", {
         ttlExpired: result.ttlExpired.length,
-        contradictions: result.contradictions.length,
+        potentialDuplicates: result.potentialDuplicates.length,
         lowValueObs: result.lowValueObs.length,
         dryRun,
       });

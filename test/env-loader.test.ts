@@ -48,6 +48,7 @@ describe("loadEnvFile", () => {
     delete process.env["AGENTMEMORY_BLOB_BACKEND"];
     delete process.env["CONSOLIDATION_ENABLED"];
     delete process.env["GRAPH_EXTRACTION_ENABLED"];
+    delete process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"];
     delete process.env["TOKEN"];
     delete process.env["HASHVAL"];
   });
@@ -152,6 +153,18 @@ describe("loadEnvFile", () => {
     expect(cfg.getMetadataBackend()).toBe("postgres");
     expect(cfg.getGraphBackend()).toBe("neo4j");
     expect(cfg.getBlobBackend()).toBe("filesystem");
+  });
+
+  it("clamps graph search timeout to the bounded request budget", async () => {
+    process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"] = "9999";
+    const cfg = await freshConfig();
+    expect(cfg.getGraphSearchTimeoutMs()).toBe(250);
+
+    process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"] = "1";
+    expect(cfg.getGraphSearchTimeoutMs()).toBe(100);
+
+    delete process.env["AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS"];
+    expect(cfg.getGraphSearchTimeoutMs()).toBe(200);
   });
 });
 

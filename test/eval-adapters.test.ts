@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { agentmemoryAdapter } from "../eval/runner/adapters/agentmemory.js";
 import { grepAdapter } from "../eval/runner/adapters/grep.js";
 import { aggregate, scoreQuestion } from "../eval/runner/score.js";
 import type { Question, Session } from "../eval/runner/types.js";
@@ -88,5 +89,51 @@ describe("eval scaffold", () => {
     expect(agg.byAdapter.grep.hit).toBe(1);
     expect(agg.byAdapter.grep.n).toBe(2);
     expect(agg.byType.t1.grep.n).toBe(2);
+  });
+
+  it("scopes agentmemory benchmark ingestion and removes it after query", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ url, body });
+      if (url.endsWith("/remember")) {
+        return {
+          ok: true,
+          json: async () => ({ memory: { id: "mem-eval-1" } }),
+        } as Response;
+      }
+      if (url.endsWith("/forget")) {
+        return { ok: true, json: async () => ({ success: true }) } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          results: [{ obsId: "mem-eval-1", sessionId: "memory", score: 1 }],
+        }),
+      } as Response;
+    }) as typeof fetch;
+    try {
+      const state = await agentmemoryAdapter.init(
+        [
+          { id: "empty-distractor", content: "" },
+          { id: "session-1", content: "isolated benchmark session" },
+        ],
+        { baseUrl: "http://eval.test", scopeKey: "longmemeval:q-1" },
+      );
+      const ranked = await agentmemoryAdapter.query("isolated benchmark", state, 5);
+      await agentmemoryAdapter.teardown?.(state);
+
+      expect(ranked).toEqual([{ sessionId: "session-1", score: 1 }]);
+      expect(calls).toHaveLength(3);
+      expect(calls[0].body.project).toBe(calls[0].body.agentId);
+      expect(calls[1].body.project).toBe(calls[0].body.project);
+      expect(calls[1].body.agentId).toBe(calls[0].body.agentId);
+      expect(calls[1].body.includeLessons).toBe(false);
+      expect(calls[2].body).toEqual({ memoryId: "mem-eval-1" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

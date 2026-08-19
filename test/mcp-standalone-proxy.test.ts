@@ -80,6 +80,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       query: "auth bug",
       limit: 5,
       project: "api",
+      agentId: "opencode",
     });
     const body = JSON.parse(res.content[0].text);
     expect(body.query).toBe("auth bug");
@@ -88,6 +89,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       query: "auth bug",
       limit: 5,
       project: "api",
+      agentId: "opencode",
     });
     const accounting = deliveryBody?.accounting as Record<string, unknown>;
     expect(deliveryBody?.source).toBe("mcp_smart_search");
@@ -126,6 +128,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       format: "full",
       token_budget: 800,
       project: "api",
+      agentId: "opencode",
     });
     const body = JSON.parse(res.content[0].text);
     expect(body.mode).toBe("full");
@@ -138,6 +141,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       format: "full",
       token_budget: 800,
       project: "api",
+      agentId: "opencode",
     });
     expect(calls.find((c) => c.url.endsWith("/agentmemory/smart-search"))).toBeUndefined();
     const deliveryCall = calls.find((c) => c.url.endsWith("/agentmemory/context-reduction/events"));
@@ -239,6 +243,32 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(body).toHaveProperty("mode", "compact");
     expect(Array.isArray(body.results)).toBe(true);
     expect(body.results[0].content).toBe("shape-check entry");
+  });
+
+  it("local fallback preserves and filters by agentId", async () => {
+    installFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    const localKv = new InMemoryKV(undefined);
+    await handleToolCall(
+      "memory_save",
+      { content: "agent-scoped note", project: "api", agentId: "agent-a" },
+      localKv,
+    );
+    await handleToolCall(
+      "memory_save",
+      { content: "agent-scoped note", project: "api", agentId: "agent-b" },
+      localKv,
+    );
+
+    const res = await handleToolCall(
+      "memory_recall",
+      { query: "agent-scoped", project: "api", agentId: "agent-a" },
+      localKv,
+    );
+    const body = JSON.parse(res.content[0].text);
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].agentId).toBe("agent-a");
   });
 
   it("attaches Bearer token on the proxied tool request, not just the probe", async () => {

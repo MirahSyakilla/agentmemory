@@ -144,10 +144,8 @@ export function registerObserveFunction(
       const pendingImageData = extractedImage;
 
       return withKeyedLock(`obs:${payload.sessionId}`, async () => {
-        // Existing session is the source of truth for agentId (even
-        // undefined). Env AGENT_ID only fires when no session row
-        // exists yet — otherwise an unscoped session would get
-        // retroactively scoped by a later AGENT_ID export.
+        // A host-provided actor identifies this individual observation. Fall
+        // back to the session owner, then the server default, for legacy hooks.
         const existingSession = await kv.get<Session & { updatedAt?: string }>(
           KV.sessions,
           payload.sessionId,
@@ -166,9 +164,9 @@ export function registerObserveFunction(
           }
         }
 
-        const inheritedAgentId = existingSession
+        const inheritedAgentId = payload.agentId ?? (existingSession
           ? existingSession.agentId
-          : getAgentId();
+          : getAgentId());
         if (inheritedAgentId) {
           raw.agentId = inheritedAgentId;
         }
@@ -317,7 +315,7 @@ export function registerObserveFunction(
             updatedAt: ts,
             status: "active",
             observationCount: 1,
-            ...(inheritedAgentId ? { agentId: inheritedAgentId } : {}),
+            ...(raw.agentId ? { agentId: raw.agentId } : {}),
             ...(trimmedPrompt && trimmedPrompt.length > 0
               ? { firstPrompt: trimmedPrompt }
               : {}),

@@ -22,12 +22,14 @@ interface FileHistory {
 export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::file-context", 
     async (
-      data: { sessionId?: string; files?: string[]; project?: string } | undefined,
+      data: { sessionId?: string; files?: string[]; project?: string; agentId?: string } | undefined,
     ) => {
       const sessionId =
         data && typeof data.sessionId === "string" ? data.sessionId.trim() : "";
       const normalizedProject =
         typeof data?.project === "string" ? data.project.trim() : undefined;
+      const normalizedAgentId =
+        typeof data?.agentId === "string" ? data.agentId.trim() : undefined;
       const files = Array.isArray(data?.files)
         ? data!.files
             .map((file) => (typeof file === "string" ? file.trim() : ""))
@@ -50,6 +52,11 @@ export function registerFileIndexFunction(sdk: ISdk, kv: StateKV): void {
         : sessions;
       if (normalizedProject) {
         otherSessions = otherSessions.filter((s) => s.project === normalizedProject);
+      }
+      if (normalizedAgentId && normalizedAgentId !== "*") {
+        otherSessions = otherSessions.filter(
+          (session) => !session.agentId || session.agentId === normalizedAgentId,
+        );
       }
       otherSessions = otherSessions
         .sort(

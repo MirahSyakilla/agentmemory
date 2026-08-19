@@ -9,6 +9,8 @@ const HOOK_ENV_KEYS = new Set([
 	"AGENTMEMORY_SECRET",
 	"AGENTMEMORY_INJECT_CONTEXT",
 	"AGENTMEMORY_PROJECT_NAME",
+	"AGENT_ID",
+	"AGENTMEMORY_AGENT_SCOPE",
 	"CLAUDE_MEMORY_BRIDGE"
 ]);
 let hookEnvLoaded = false;
@@ -67,6 +69,19 @@ function hookCwd(data) {
 	const projectDir = process.env["DEVIN_PROJECT_DIR"] || process.env["CLAUDE_PROJECT_DIR"];
 	if (projectDir && projectDir.trim()) return projectDir;
 }
+function hookAgentId(data) {
+	const values = data ? [
+		data.agentId,
+		data.agent_id,
+		data.agentName,
+		data.agent_name
+	] : [];
+	values.push(process.env["AGENT_ID"]);
+	for (const value of values) if (typeof value === "string" && value.trim()) return value.trim().slice(0, 128);
+	if (process.env["OPENCODE"] === "1") return "opencode";
+	if (process.env["CODEX_THREAD_ID"]) return "codex";
+	if (process.env["CLAUDE_PROJECT_DIR"]) return "claude-code";
+}
 //#endregion
 //#region src/hooks/post-tool-failure.ts
 function isSdkChildContext(payload) {
@@ -98,6 +113,7 @@ async function main() {
 	const toolInput = data.tool_input ?? data.toolArgs;
 	const error = data.error ?? data.errorMessage;
 	const cwd = hookCwd(data) || process.cwd();
+	const agentId = hookAgentId(data);
 	fetch(`${REST_URL}/agentmemory/observe`, {
 		method: "POST",
 		headers: authHeaders(),
@@ -107,6 +123,7 @@ async function main() {
 			project: resolveProject(cwd),
 			cwd,
 			timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+			...agentId ? { agentId } : {},
 			data: {
 				tool_name: toolName,
 				tool_input: typeof toolInput === "string" ? toolInput.slice(0, 4e3) : JSON.stringify(toolInput ?? "").slice(0, 4e3),

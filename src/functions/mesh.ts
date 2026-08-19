@@ -12,9 +12,14 @@ import type {
   MemoryRelation,
   GraphNode,
   GraphEdge,
+  Evidence,
+  Artifact,
+  Experiment,
+  NegativeMemory,
 } from "../types.js";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { reconcileExperimentLinks } from "./experiment-links.js";
 
 function isPrivateIP(ip: string): boolean {
   if (ip === "127.0.0.1" || ip === "::1" || ip === "0.0.0.0") return true;
@@ -62,6 +67,10 @@ const DEFAULT_SHARED_SCOPES = [
   "relations",
   "graph:nodes",
   "graph:edges",
+  "evidence",
+  "artifacts",
+  "experiments",
+  "negative-memories",
 ];
 
 interface MeshSyncPayload {
@@ -72,6 +81,10 @@ interface MeshSyncPayload {
   relations?: MemoryRelation[];
   graphNodes?: GraphNode[];
   graphEdges?: GraphEdge[];
+  evidence?: Evidence[];
+  artifacts?: Artifact[];
+  experiments?: Experiment[];
+  negativeMemories?: NegativeMemory[];
 }
 
 async function lwwMergeList<T extends { id: string }>(
@@ -127,6 +140,39 @@ async function lwwMergeGraphNodes(
       }
       if (new Date(ts) > new Date(graphNodeTs(existing))) {
         await kv.set(KV.graphNodes, item.id, item);
+        return true;
+      }
+      return false;
+    });
+    if (wrote) count++;
+  }
+  return count;
+}
+
+function structuredRecordTs(record: { createdAt: string; updatedAt?: string }): string {
+  return record.updatedAt || record.createdAt;
+}
+
+async function lwwMergeStructuredRecords<T extends { id: string; createdAt: string; updatedAt?: string }>(
+  kv: StateKV,
+  scope: string,
+  items: T[] | undefined,
+  lockPrefix: string,
+): Promise<number> {
+  if (!items || !Array.isArray(items)) return 0;
+  let count = 0;
+  for (const item of items) {
+    if (!item.id || typeof item.id !== "string") continue;
+    const timestamp = structuredRecordTs(item);
+    if (!timestamp || Number.isNaN(new Date(timestamp).getTime())) continue;
+    const wrote = await withKeyedLock(`${lockPrefix}:${item.id}`, async () => {
+      const existing = await kv.get<T>(scope, item.id);
+      if (!existing) {
+        await kv.set(scope, item.id, item);
+        return true;
+      }
+      if (new Date(timestamp) > new Date(structuredRecordTs(existing))) {
+        await kv.set(scope, item.id, item);
         return true;
       }
       return false;
@@ -296,7 +342,7 @@ export function registerMeshFunction(
                 const pullData = (await response.json()) as {
                   memories?: Memory[];
                   actions?: Action[];
-                };
+                } & MeshSyncPayload;
                 result.pulled = await applySyncData(kv, pullData, scopes);
               } else {
                 result.errors.push(`pull failed: HTTP ${response.status}`);
@@ -362,6 +408,13 @@ export function registerMeshFunction(
       }
       accepted += await lwwMergeGraphNodes(kv, data.graphNodes);
       accepted += await lwwMergeList(kv, KV.graphEdges, data.graphEdges, "mem:gedge", "createdAt");
+      accepted += await lwwMergeStructuredRecords(kv, KV.evidence, data.evidence, "mem:evidence");
+      accepted += await lwwMergeStructuredRecords(kv, KV.artifacts, data.artifacts, "mem:artifact");
+      accepted += await lwwMergeStructuredRecords(kv, KV.experiments, data.experiments, "mem:experiment");
+      accepted += await lwwMergeStructuredRecords(kv, KV.negativeMemories, data.negativeMemories, "mem:negative-memory");
+      if (data.evidence || data.artifacts || data.experiments || data.negativeMemories) {
+        await reconcileExperimentLinks(kv, { mode: "merge" });
+      }
       await recordAudit(kv, "mesh_sync", "mem::mesh-receive", [], {
         action: "mesh.receive",
         accepted,
@@ -393,6 +446,13 @@ function deltaFilter<T>(
   return items.filter(
     (item) => new Date((item as Record<string, unknown>)[tsField] as string).getTime() > sinceTime,
   );
+}
+
+function structuredDeltaFilter<T extends { createdAt: string; updatedAt?: string }>(
+  items: T[],
+  sinceTime: number,
+): T[] {
+  return items.filter((item) => new Date(structuredRecordTs(item)).getTime() > sinceTime);
 }
 
 async function collectSyncData(
@@ -447,6 +507,30 @@ async function collectSyncData(
     result.graphEdges = deltaFilter(all, sinceTime, "createdAt");
   }
 
+  if (scopes.includes("evidence")) {
+    let all = await kv.list<Evidence>(KV.evidence);
+    if (syncFilter?.project) all = all.filter((record) => record.project === syncFilter.project);
+    result.evidence = structuredDeltaFilter(all, sinceTime);
+  }
+
+  if (scopes.includes("artifacts")) {
+    let all = await kv.list<Artifact>(KV.artifacts);
+    if (syncFilter?.project) all = all.filter((record) => record.project === syncFilter.project);
+    result.artifacts = structuredDeltaFilter(all, sinceTime);
+  }
+
+  if (scopes.includes("experiments")) {
+    let all = await kv.list<Experiment>(KV.experiments);
+    if (syncFilter?.project) all = all.filter((record) => record.project === syncFilter.project);
+    result.experiments = structuredDeltaFilter(all, sinceTime);
+  }
+
+  if (scopes.includes("negative-memories")) {
+    let all = await kv.list<NegativeMemory>(KV.negativeMemories);
+    if (syncFilter?.project) all = all.filter((record) => record.project === syncFilter.project);
+    result.negativeMemories = structuredDeltaFilter(all, sinceTime);
+  }
+
   return result;
 }
 
@@ -489,6 +573,26 @@ async function applySyncData(
   }
   if (scopes.includes("graph:edges")) {
     applied += await lwwMergeList(kv, KV.graphEdges, data.graphEdges, "mem:gedge", "createdAt");
+  }
+  if (scopes.includes("evidence")) {
+    applied += await lwwMergeStructuredRecords(kv, KV.evidence, data.evidence, "mem:evidence");
+  }
+  if (scopes.includes("artifacts")) {
+    applied += await lwwMergeStructuredRecords(kv, KV.artifacts, data.artifacts, "mem:artifact");
+  }
+  if (scopes.includes("experiments")) {
+    applied += await lwwMergeStructuredRecords(kv, KV.experiments, data.experiments, "mem:experiment");
+  }
+  if (scopes.includes("negative-memories")) {
+    applied += await lwwMergeStructuredRecords(kv, KV.negativeMemories, data.negativeMemories, "mem:negative-memory");
+  }
+  if (
+    (scopes.includes("evidence") && data.evidence) ||
+    (scopes.includes("artifacts") && data.artifacts) ||
+    (scopes.includes("experiments") && data.experiments) ||
+    (scopes.includes("negative-memories") && data.negativeMemories)
+  ) {
+    await reconcileExperimentLinks(kv, { mode: "merge" });
   }
 
   return applied;

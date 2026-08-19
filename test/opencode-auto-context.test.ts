@@ -67,7 +67,7 @@ describe("OpenCode plugin project name resolution", () => {
 
   async function startPayloadFor(
     ctx: Record<string, unknown>,
-  ): Promise<{ project: unknown; cwd: unknown }> {
+  ): Promise<{ project: unknown; cwd: unknown; agentId: unknown }> {
     const { AgentmemoryCapturePlugin } = await import(
       "../plugin/opencode/agentmemory-capture.ts"
     );
@@ -82,7 +82,7 @@ describe("OpenCode plugin project name resolution", () => {
     );
     if (!startCall) throw new Error("no /session/start call captured");
     const body = JSON.parse((startCall[1] as { body: string }).body);
-    return { project: body.project, cwd: body.cwd };
+    return { project: body.project, cwd: body.cwd, agentId: body.agentId };
   }
 
   async function projectFor(ctx: Record<string, unknown>): Promise<unknown> {
@@ -106,6 +106,7 @@ describe("OpenCode plugin project name resolution", () => {
     const payload = await startPayloadFor({ worktree: "/repo/alpha" });
     expect(payload.project).toBe("alpha");
     expect(payload.cwd).toBe("/repo/alpha");
+    expect(payload.agentId).toBe("opencode");
   });
 
   it("falls back to ctx.project.id when worktree is absent", async () => {

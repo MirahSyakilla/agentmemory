@@ -3,6 +3,9 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import type {
   Memory,
+  Evidence,
+  Artifact,
+  Experiment,
   CompressedObservation,
   Session,
 } from "../types.js";
@@ -44,6 +47,10 @@ export function registerVerifyFunction(sdk: ISdk, kv: StateKV): void {
             updatedAt: memory.updatedAt,
             supersedes: memory.supersedes,
             parentId: memory.parentId,
+            layer: memory.layer,
+            epistemicState: memory.epistemicState,
+            temporal: memory.temporal,
+            authority: memory.authority,
           },
           citations: observations.map((o) => ({
             observationId: o.observation.id,
@@ -56,6 +63,56 @@ export function registerVerifyFunction(sdk: ISdk, kv: StateKV): void {
             sessionStatus: o.session?.status,
           })),
           citationCount: observations.length,
+          evidenceIds: memory.evidenceIds ?? [],
+          artifactIds: memory.artifactIds ?? [],
+          experimentIds: memory.experimentIds ?? [],
+          conflictIds: memory.conflictIds ?? [],
+        };
+      }
+
+      const evidence = await kv.get<Evidence>(KV.evidence, data.id);
+      if (evidence) {
+        return {
+          success: true,
+          type: "evidence",
+          evidence,
+          verification: {
+            verifiedAt: evidence.verifiedAt ?? null,
+            verifier: evidence.verifier ?? null,
+            method: evidence.verificationMethod ?? null,
+          },
+          citationCount: evidence.sourceIds.length,
+          citations: evidence.sourceIds.map((id) => ({ sourceId: id })),
+        };
+      }
+
+      const artifact = await kv.get<Artifact>(KV.artifacts, data.id);
+      if (artifact) {
+        return {
+          success: true,
+          type: "artifact",
+          artifact,
+          evidenceIds: artifact.evidenceIds,
+          experimentIds: artifact.experimentIds,
+          citationCount: artifact.evidenceIds.length,
+          citations: artifact.evidenceIds.map((id) => ({ evidenceId: id })),
+        };
+      }
+
+      const experiment = await kv.get<Experiment>(KV.experiments, data.id);
+      if (experiment) {
+        return {
+          success: true,
+          type: "experiment",
+          experiment,
+          evidenceIds: experiment.evidenceIds,
+          artifactIds: experiment.artifactIds,
+          observationIds: experiment.observationIds,
+          citationCount: experiment.evidenceIds.length + experiment.observationIds.length,
+          citations: [
+            ...experiment.evidenceIds.map((id) => ({ evidenceId: id })),
+            ...experiment.observationIds.map((id) => ({ observationId: id })),
+          ],
         };
       }
 

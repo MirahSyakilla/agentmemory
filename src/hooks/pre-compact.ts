@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 import { loadHookEnv } from "./_env.js";
 import { recordContextReduction } from "./_context-reduction.js";
 import type { ContextReductionAccounting } from "../types.js";
@@ -40,6 +40,7 @@ async function main() {
 
   const sessionId = ((data.session_id || data.sessionId || data.conversation_id) as string) || "unknown";
   const project = resolveProject(hookCwd(data));
+  const agentId = hookAgentId(data);
 
   if (process.env["CLAUDE_MEMORY_BRIDGE"] === "true") {
     try {
@@ -60,7 +61,7 @@ async function main() {
     const res = await fetch(`${REST_URL}/agentmemory/context`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ sessionId, project, budget: 1500 }),
+      body: JSON.stringify({ sessionId, project, budget: 1500, ...(agentId ? { agentId } : {}) }),
       signal: AbortSignal.timeout(5000),
     });
 

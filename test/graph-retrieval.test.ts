@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GraphRetrieval } from "../src/functions/graph-retrieval.js";
 import type { GraphNode, GraphEdge, CompressedObservation, Session } from "../src/types.js";
 
@@ -29,6 +29,36 @@ function mockKV(
     store.get(`mem:obs:${obs.sessionId}`)!.set(obs.id, obs);
   }
 
+  const list = async <T>(scope: string): Promise<T[]> => {
+    const entries = store.get(scope);
+    return entries ? (Array.from(entries.values()) as T[]) : [];
+  };
+  const getGraphNeighborhood = async (nodeIds: string[], maxDepth: number) => {
+    const graphNodes = await list<GraphNode>("mem:graph:nodes");
+    const graphEdges = await list<GraphEdge>("mem:graph:edges");
+    const nodeById = new Map(graphNodes.map((node) => [node.id, node]));
+    const included = new Set(nodeIds);
+    let frontier = nodeIds;
+    for (let depth = 0; depth < maxDepth; depth++) {
+      const next = new Set<string>();
+      for (const edge of graphEdges) {
+        if (frontier.includes(edge.sourceNodeId)) next.add(edge.targetNodeId);
+        if (frontier.includes(edge.targetNodeId)) next.add(edge.sourceNodeId);
+      }
+      for (const id of next) included.add(id);
+      frontier = [...next];
+    }
+    return {
+      nodes: [...included]
+        .map((id) => nodeById.get(id))
+        .filter((node): node is GraphNode => Boolean(node)),
+      edges: graphEdges.filter(
+        (edge) =>
+          included.has(edge.sourceNodeId) && included.has(edge.targetNodeId),
+      ),
+    };
+  };
+
   return {
     get: async <T>(scope: string, key: string): Promise<T | null> => {
       return (store.get(scope)?.get(key) as T) ?? null;
@@ -41,9 +71,63 @@ function mockKV(
     delete: async (scope: string, key: string): Promise<void> => {
       store.get(scope)?.delete(key);
     },
-    list: async <T>(scope: string): Promise<T[]> => {
-      const entries = store.get(scope);
-      return entries ? (Array.from(entries.values()) as T[]) : [];
+    list,
+    findGraphNodesByNames: async (names: string[]) =>
+      (await list<GraphNode>("mem:graph:nodes")).filter((node) =>
+        names.some((name) =>
+          node.name.toLowerCase().includes(name.toLowerCase()),
+        ),
+      ),
+    findGraphNodesByObservationIds: async (obsIds: string[]) =>
+      (await list<GraphNode>("mem:graph:nodes")).filter((node) =>
+        (node.sourceObservationIds ?? []).some((obsId) =>
+          obsIds.includes(obsId),
+        ),
+      ),
+    getGraphNeighborhood,
+  };
+}
+
+function targetedMockKV(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  observations: CompressedObservation[] = [],
+) {
+  const base = mockKV(nodes, edges, observations);
+  return {
+    ...base,
+    findGraphNodesByNames: async (names: string[]) =>
+      nodes.filter((node) =>
+        names.some((name) =>
+          node.name.toLowerCase().includes(name.toLowerCase()),
+        ),
+      ),
+    findGraphNodesByObservationIds: async (obsIds: string[]) =>
+      nodes.filter((node) =>
+        node.sourceObservationIds.some((obsId) => obsIds.includes(obsId)),
+      ),
+    getGraphNeighborhood: async (nodeIds: string[], maxDepth: number) => {
+      const nodeById = new Map(nodes.map((node) => [node.id, node]));
+      const included = new Set(nodeIds);
+      let frontier = nodeIds;
+      for (let depth = 0; depth < maxDepth; depth++) {
+        const next = new Set<string>();
+        for (const edge of edges) {
+          if (frontier.includes(edge.sourceNodeId)) next.add(edge.targetNodeId);
+          if (frontier.includes(edge.targetNodeId)) next.add(edge.sourceNodeId);
+        }
+        for (const id of next) included.add(id);
+        frontier = [...next];
+      }
+      return {
+        nodes: [...included]
+          .map((id) => nodeById.get(id))
+          .filter((node): node is GraphNode => Boolean(node)),
+        edges: edges.filter(
+          (edge) =>
+            included.has(edge.sourceNodeId) && included.has(edge.targetNodeId),
+        ),
+      };
     },
   };
 }
@@ -138,6 +222,49 @@ describe("GraphRetrieval", () => {
 
     const results = await retrieval.searchByEntities(["auth"]);
     expect(results.length).toBeGreaterThan(0);
+  });
+
+  it("uses targeted graph backend operations when available", async () => {
+    const nodes = [
+      makeNode("n1", "React", "library", ["obs_1"]),
+      makeNode("n2", "Component", "concept", ["obs_2"]),
+    ];
+    const edges = [makeEdge("e1", "n1", "n2", "uses")];
+    const kv = targetedMockKV(nodes, edges);
+    const list = vi.fn(async (scope: string) => {
+      if (scope === "mem:graph:nodes" || scope === "mem:graph:edges") {
+        throw new Error("full graph enumeration must not run");
+      }
+      return kv.list(scope);
+    });
+    const retrieval = new GraphRetrieval({ ...kv, list } as never);
+
+    const results = await retrieval.searchByEntities(["React"], 2);
+
+    expect(results.map((result) => result.obsId)).toEqual(
+      expect.arrayContaining(["obs_1", "obs_2"]),
+    );
+    expect(list).not.toHaveBeenCalledWith("mem:graph:nodes");
+    expect(list).not.toHaveBeenCalledWith("mem:graph:edges");
+  });
+
+  it("does not enumerate graph scopes when targeted retrieval is unavailable", async () => {
+    const base = mockKV(
+      [makeNode("n1", "React", "library", ["obs_1"])],
+      [],
+    );
+    const {
+      findGraphNodesByNames: _findGraphNodesByNames,
+      findGraphNodesByObservationIds: _findGraphNodesByObservationIds,
+      getGraphNeighborhood: _getGraphNeighborhood,
+      ...legacyKv
+    } = base;
+    const list = vi.fn(legacyKv.list);
+    const retrieval = new GraphRetrieval({ ...legacyKv, list } as never);
+
+    await expect(retrieval.searchByEntities(["React"])).resolves.toEqual([]);
+    expect(list).not.toHaveBeenCalledWith("mem:graph:nodes");
+    expect(list).not.toHaveBeenCalledWith("mem:graph:edges");
   });
 
   it("traverses graph edges to find related observations", async () => {

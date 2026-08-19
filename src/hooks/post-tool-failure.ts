@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "./_env.js";
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -40,6 +40,7 @@ async function main() {
   const error = data.error ?? data.errorMessage;
 
   const cwd = hookCwd(data) || process.cwd();
+  const agentId = hookAgentId(data);
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
@@ -50,6 +51,7 @@ async function main() {
       project: resolveProject(cwd),
       cwd,
       timestamp: new Date().toISOString(),
+      ...(agentId ? { agentId } : {}),
       data: {
         tool_name: toolName,
         tool_input:

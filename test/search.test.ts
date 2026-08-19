@@ -188,6 +188,63 @@ describe("mem::search", () => {
     expect(hit?.title).toBe("Pineapple belongs on pizza");
   });
 
+  it("keeps memory origin and bounded evidence metadata across search formats", async () => {
+    const evidence = {
+      id: "evd_search",
+      kind: "test-log",
+      source: "vitest",
+      locator: "test/search.test.ts:190",
+      content: "private evidence body must not be returned in metadata",
+      capturedAt: "2026-02-01T00:00:00Z",
+      provenance: { channel: "tool", capturedAt: "2026-02-01T00:00:00Z" },
+      sourceIds: [],
+      createdAt: "2026-02-01T00:00:00Z",
+      project: "demo",
+    };
+    await kv.set(KV.evidence, evidence.id, evidence);
+    await kv.set(KV.memories, "mem_provenance", {
+      id: "mem_provenance",
+      createdAt: "2026-02-03T00:00:00Z",
+      updatedAt: "2026-02-03T00:00:00Z",
+      type: "fact",
+      title: "Auth provenance",
+      content: "Auth was verified by the test log.",
+      concepts: ["auth"],
+      files: [],
+      sessionIds: [],
+      strength: 8,
+      version: 1,
+      isLatest: true,
+      project: "demo",
+      origin: { channel: "tool", detail: "test-run", capturedAt: "2026-02-03T00:00:00Z" },
+      evidenceIds: [evidence.id],
+    });
+    await rebuildIndex(kv as never);
+
+    for (const format of ["full", "compact", "narrative"] as const) {
+      const result = (await sdk.trigger("mem::search", {
+        query: "Auth provenance",
+        format,
+      })) as { results: Array<{ metadata?: any; observation?: any }> };
+      const hit = result.results.find((entry: any) =>
+        entry.observation?.id === "mem_provenance" || entry.obsId === "mem_provenance",
+      );
+      expect(hit?.metadata?.origin).toEqual({
+        channel: "tool",
+        detail: "test-run",
+        capturedAt: "2026-02-03T00:00:00Z",
+      });
+      expect(hit?.metadata?.evidence.ids).toEqual([evidence.id]);
+      expect(hit?.metadata?.evidence.summaries[0]).toMatchObject({
+        id: evidence.id,
+        kind: "test-log",
+        source: "vitest",
+        locator: "test/search.test.ts:190",
+      });
+      expect(JSON.stringify(hit?.metadata)).not.toContain(evidence.content);
+    }
+  });
+
   it("rebuildIndex populates the vector index", async () => {
     const mockEmbedder = {
       name: "test",

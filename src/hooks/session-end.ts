@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 
 import "./_env.js";
 
@@ -69,6 +69,7 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId || data.conversation_id) as string) || "unknown";
+  const agentId = hookAgentId(data);
 
   const transcriptPrompts = extractTranscriptPrompts(data);
   if (transcriptPrompts.length > 0) {
@@ -86,6 +87,7 @@ async function main() {
             project,
             cwd,
             timestamp,
+            ...(agentId ? { agentId } : {}),
             data: { prompt },
           }),
           signal: AbortSignal.timeout(3000),

@@ -1,10 +1,17 @@
 import type { ISdk } from 'iii-sdk'
 import type {
   StateKVBackend,
+  StateKVClaimResult,
+  StateKVGraphNeighborhood,
+  StateKVGraphNodePage,
+  StateKVGraphObservationIndexEntry,
+  StateKVGraphQueryOptions,
   StateKVJsonAggregateRequest,
   StateKVJsonAggregateResult,
   StateKVJsonFilter,
 } from './backend-kv.js'
+import type { GraphNode } from '../types.js'
+import { KV } from './schema.js'
 
 function matchesJsonFilter(
   value: unknown,
@@ -56,6 +63,45 @@ function aggregateValues(
   }
 }
 
+function abortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason
+  const error = new Error("state operation aborted")
+  error.name = "AbortError"
+  return error
+}
+
+function awaitWithinDeadline<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      callback()
+    }
+    const onAbort = () => finish(() => reject(abortError(signal)))
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`state list timed out after ${timeoutMs}ms`))),
+      timeoutMs,
+    )
+
+    if (signal?.aborted) {
+      onAbort()
+      return
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    )
+  })
+}
+
 export class StateKV {
   constructor(
     private sdk: ISdk,
@@ -82,6 +128,20 @@ export class StateKV {
       function_id: 'state::set',
       payload: { scope, key, value },
     })
+  }
+
+  async claim<T = unknown>(
+    scope: string,
+    key: string,
+    value: T,
+  ): Promise<StateKVClaimResult<T>> {
+    const backend = this.backend(scope);
+    if (!backend?.claim) {
+      throw new Error(
+        `Atomic KV claims are unavailable for scope "${scope}"`,
+      );
+    }
+    return backend.claim<T>(scope, key, value);
   }
 
   async update<T = unknown>(
@@ -116,6 +176,69 @@ export class StateKV {
       function_id: 'state::list',
       payload: { scope },
     })
+  }
+
+  async listWithTimeout<T = unknown>(
+    scope: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    const backend = this.backend(scope);
+    if (backend?.listWithTimeout) {
+      return backend.listWithTimeout<T>(scope, timeoutMs, signal);
+    }
+    return awaitWithinDeadline(this.list<T>(scope), timeoutMs, signal)
+  }
+
+  async findGraphNodesByNames(
+    names: string[],
+    limit: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<GraphNode[] | null> {
+    const backend = this.backend(KV.graphNodes);
+    if (!backend?.findGraphNodesByNames) return null;
+    return backend.findGraphNodesByNames(names, limit, options);
+  }
+
+  async findGraphNodesByObservationIds(
+    observationIds: string[],
+    limit: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<GraphNode[] | null> {
+    const backend = this.backend(KV.graphNodes);
+    if (!backend?.findGraphNodesByObservationIds) return null;
+    return backend.findGraphNodesByObservationIds(observationIds, limit, options);
+  }
+
+  async getGraphNeighborhood(
+    nodeIds: string[],
+    maxDepth: number,
+    maxNodes: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<StateKVGraphNeighborhood | null> {
+    const backend = this.backend(KV.graphNodes);
+    if (!backend?.getGraphNeighborhood) return null;
+    return backend.getGraphNeighborhood(nodeIds, maxDepth, maxNodes, options);
+  }
+
+  async pageGraphNodes(
+    afterId: string,
+    limit: number,
+    options?: StateKVGraphQueryOptions,
+  ): Promise<StateKVGraphNodePage | null> {
+    const backend = this.backend(KV.graphNodes);
+    if (!backend?.pageGraphNodes) return null;
+    return backend.pageGraphNodes(afterId, limit, options);
+  }
+
+  async mergeGraphObservationIndex(
+    entries: StateKVGraphObservationIndexEntry[],
+    options?: StateKVGraphQueryOptions,
+  ): Promise<boolean> {
+    const backend = this.backend(KV.graphNodes);
+    if (!backend?.mergeGraphObservationIndex) return false;
+    await backend.mergeGraphObservationIndex(entries, options);
+    return true;
   }
 
   async aggregateJson(

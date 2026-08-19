@@ -30,6 +30,39 @@ function mockKV() {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
     },
+    pageGraphNodes: async (afterId: string, limit: number) => {
+      const nodes = (await (async () => {
+        const entries = store.get("mem:graph:nodes");
+        return entries
+          ? (Array.from(entries.values()) as GraphNode[])
+              .filter((node) => !node.stale && node.id > afterId)
+              .sort((a, b) => a.id.localeCompare(b.id))
+          : [];
+      })());
+      const page = nodes.slice(0, limit);
+      return {
+        nodes: page,
+        nextCursor: page.at(-1)?.id ?? null,
+        hasMore: nodes.length > limit,
+      };
+    },
+    mergeGraphObservationIndex: async (
+      entries: Array<{ observationId: string; nodeIds: string[] }>,
+    ) => {
+      for (const entry of entries) {
+        const existing =
+          (store.get("mem:graph:observation-index")?.get(entry.observationId) as
+            | string[]
+            | undefined) ?? [];
+        if (!store.has("mem:graph:observation-index")) {
+          store.set("mem:graph:observation-index", new Map());
+        }
+        store
+          .get("mem:graph:observation-index")!
+          .set(entry.observationId, [...new Set([...existing, ...entry.nodeIds])]);
+      }
+      return true;
+    },
   };
 }
 
@@ -114,6 +147,46 @@ describe("Graph Functions", () => {
     const edges = await kv.list<GraphEdge>("mem:graph:edges");
     expect(edges.length).toBe(1);
     expect(edges[0].type).toBe("uses");
+  });
+
+  it("graph-extract maintains the observation-to-node reverse index", async () => {
+    await sdk.trigger("mem::graph-extract", { observations: [testObs] });
+
+    const nodeIds = await kv.get<string[]>(
+      "mem:graph:observation-index",
+      testObs.id,
+    );
+    expect(nodeIds).toHaveLength(2);
+    const nodes = await kv.list<GraphNode>("mem:graph:nodes");
+    expect(nodeIds).toEqual(
+      expect.arrayContaining(nodes.map((node) => node.id)),
+    );
+  });
+
+  it("backfills the observation index through resumable targeted pages", async () => {
+    await sdk.trigger("mem::graph-extract", { observations: [testObs] });
+
+    const first = (await sdk.trigger("mem::graph-observation-index-backfill", {
+      pageSize: 1,
+      maxPages: 1,
+    })) as { success: boolean; complete: boolean; processedNodes: number };
+    expect(first.success).toBe(true);
+    expect(first.complete).toBe(false);
+    expect(first.processedNodes).toBe(1);
+
+    const second = (await sdk.trigger("mem::graph-observation-index-backfill", {
+      pageSize: 1,
+      maxPages: 1,
+    })) as {
+      success: boolean;
+      complete: boolean;
+      processedNodes: number;
+      indexedReferences: number;
+    };
+    expect(second.success).toBe(true);
+    expect(second.complete).toBe(true);
+    expect(second.processedNodes).toBe(2);
+    expect(second.indexedReferences).toBe(2);
   });
 
   it("graph-extract accepts self-closing entity tags", async () => {

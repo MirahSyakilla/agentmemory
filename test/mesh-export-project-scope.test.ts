@@ -7,7 +7,7 @@ vi.mock("../src/logger.js", () => ({
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { KV } from "../src/state/schema.js";
 import { SAFE_PAYLOAD_BYTES } from "../src/state/frame-guard.js";
-import type { Memory } from "../src/types.js";
+import type { Experiment, Memory } from "../src/types.js";
 
 // A project-scoped mesh export must filter memories like actions: unscoped
 // memories leak across projects and can push the payload past the transport
@@ -99,6 +99,34 @@ describe("api::mesh-export project scoping", () => {
     expect(res.status_code).toBe(200);
     const memories = res.body.memories as Memory[];
     expect(memories.map((m) => m.id).sort()).toEqual(["m-alpha", "m-beta"]);
+  });
+
+  it("exports project-scoped structured experiments unchanged", async () => {
+    const kv = mockKV();
+    const experiment: Experiment = {
+      id: "exp-alpha",
+      objective: "Transfer experiment",
+      commands: [],
+      inputs: [],
+      artifactIds: [],
+      observationIds: [],
+      evidenceIds: [],
+      followUp: [],
+      status: "completed",
+      provenance: { channel: "user", capturedAt: "2026-08-19T00:00:00.000Z" },
+      authority: { source: "user", confidence: 1 },
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T00:00:00.000Z",
+      project: "alpha",
+    };
+    await kv.set(KV.experiments, experiment.id, experiment);
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, kv as never, SECRET);
+
+    const res = await meshExport(sdk, "alpha");
+
+    expect(res.status_code).toBe(200);
+    expect(res.body.experiments).toEqual([experiment]);
   });
 
   it("avoids the 413 when only another project's memory is oversized", async () => {

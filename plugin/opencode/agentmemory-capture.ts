@@ -12,6 +12,7 @@ const MAX_STASHED_FILES = 20;
 
 const DEBUG = process.env.OPENCODE_AGENTMEMORY_DEBUG === "1";
 const SECRET = process.env.AGENTMEMORY_SECRET || "";
+const AGENT_ID = process.env.AGENT_ID?.trim() || "opencode";
 
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -83,6 +84,7 @@ async function observe(
     project: proj.name,
     cwd: proj.cwd,
     timestamp: new Date().toISOString(),
+    agentId: AGENT_ID,
     data,
   });
 }
@@ -282,6 +284,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
           version: info?.version ?? null,
           project: proj.name,
           cwd: proj.cwd,
+          agentId: AGENT_ID,
         });
         // cache the context returned at session/start so the
         // chat.system.transform hook injects it without a second fetch.
@@ -697,6 +700,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
           const result = await postJson("/context", {
             sessionId: sid,
             project: projectFor(sid).name,
+            agentId: AGENT_ID,
           });
           ctx = (result as any)?.context;
         } else {
@@ -712,10 +716,12 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
       if (stash.size === 0) return;
       const files = [...stash].slice(0, 10);
 
-      const enrichResult = await postJson("/enrich", {
-        sessionId: sid,
-        files,
-        toolName: "enrich_inject",
+        const enrichResult = await postJson("/enrich", {
+          sessionId: sid,
+          files,
+          toolName: "enrich_inject",
+          project: projectFor(sid).name,
+          agentId: AGENT_ID,
       });
 
       const enrichCtx = (enrichResult as any)?.context;
@@ -736,6 +742,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
       const result = await postJson("/context", {
         sessionId: sid,
         project: projectFor(sid).name,
+        agentId: AGENT_ID,
       });
       const ctx = (result as any)?.context;
       if (typeof ctx === "string" && ctx.length > 0) {

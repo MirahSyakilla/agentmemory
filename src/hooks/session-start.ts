@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject, hookCwd } from "./_project.js";
+import { resolveProject, hookAgentId, hookCwd } from "./_project.js";
 import { loadHookEnv } from "./_env.js";
 import { recordContextReduction } from "./_context-reduction.js";
 import type { ContextReductionAccounting } from "../types.js";
@@ -78,12 +78,27 @@ async function main() {
     `ses_${Date.now().toString(36)}`;
   const cwd = hookCwd(data) || process.cwd();
   const project = resolveProject(cwd);
+  const agentId = hookAgentId(data);
+  const title =
+    typeof data.prompt === "string"
+      ? data.prompt
+      : typeof data.userPrompt === "string"
+        ? data.userPrompt
+        : typeof data.user_prompt === "string"
+          ? data.user_prompt
+          : undefined;
 
   const url = `${REST_URL}/agentmemory/session/start`;
   const init: RequestInit = {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ sessionId, project, cwd }),
+    body: JSON.stringify({
+      sessionId,
+      project,
+      cwd,
+      ...(agentId ? { agentId } : {}),
+      ...(title ? { title } : {}),
+    }),
   };
 
   if (!INJECT_CONTEXT) {

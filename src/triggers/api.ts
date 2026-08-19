@@ -49,6 +49,21 @@ function parseOptionalInt(raw: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function whitelistedFields(
+  value: unknown,
+  allowed: readonly string[],
+): Record<string, unknown> {
+  const source =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const payload: Record<string, unknown> = {};
+  for (const field of allowed) {
+    if (source[field] !== undefined) payload[field] = source[field];
+  }
+  return payload;
+}
+
 function checkAuth(
   req: ApiRequest,
   secret: string | undefined,
@@ -206,6 +221,60 @@ export function registerApiTriggers(
     streamsPort: bootStreamsPort,
   });
 
+  const registerWhitelistedPost = (
+    apiId: string,
+    apiPath: string,
+    memoryFunctionId: string,
+    allowed: readonly string[],
+    required: readonly string[] = [],
+    successStatus = 200,
+  ) => {
+    sdk.registerFunction(apiId, async (req: ApiRequest): Promise<Response> => {
+      const denied = checkAuth(req, secret);
+      if (denied) return denied;
+      const payload = whitelistedFields(req.body, allowed);
+      for (const field of required) {
+        if (typeof payload[field] !== "string" || !payload[field].trim()) {
+          return { status_code: 400, body: { error: `${field} is required` } };
+        }
+      }
+      const result = await sdk.trigger({ function_id: memoryFunctionId, payload });
+      return { status_code: successStatus, body: result };
+    });
+    sdk.registerTrigger({
+      type: "http",
+      function_id: apiId,
+      config: { api_path: apiPath, http_method: "POST" },
+    });
+  };
+
+  const registerWhitelistedGet = (
+    apiId: string,
+    apiPath: string,
+    memoryFunctionId: string,
+    allowed: readonly string[],
+  ) => {
+    sdk.registerFunction(apiId, async (req: ApiRequest): Promise<Response> => {
+      const denied = checkAuth(req, secret);
+      if (denied) return denied;
+      const payload = whitelistedFields(req.query_params, allowed);
+      if (typeof payload.limit === "string") {
+        const parsed = parseOptionalInt(payload.limit);
+        if (parsed === undefined || parsed < 1) {
+          return { status_code: 400, body: { error: "limit must be a positive integer" } };
+        }
+        payload.limit = parsed;
+      }
+      const result = await sdk.trigger({ function_id: memoryFunctionId, payload });
+      return { status_code: 200, body: result };
+    });
+    sdk.registerTrigger({
+      type: "http",
+      function_id: apiId,
+      config: { api_path: apiPath, http_method: "GET" },
+    });
+  };
+
   sdk.registerFunction("api::liveness",
     async (): Promise<Response> => ({
       status_code: 200,
@@ -333,6 +402,7 @@ export function registerApiTriggers(
       const project = asNonEmptyString(body.project);
       const cwd = asNonEmptyString(body.cwd);
       const timestamp = asNonEmptyString(body.timestamp);
+      const agentId = asNonEmptyString(body.agentId ?? body.agent_id);
       if (!hookType || !sessionId || !project || !cwd || !timestamp) {
         return {
           status_code: 400,
@@ -349,6 +419,7 @@ export function registerApiTriggers(
         cwd,
         timestamp,
         data: body.data,
+        ...(agentId ? { agentId } : {}),
       };
       const result = await sdk.trigger({ function_id: "mem::observe", payload });
       if (
@@ -384,6 +455,7 @@ export function registerApiTriggers(
         project: string;
         budget?: number;
         agentId?: string;
+        query?: string;
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -415,11 +487,13 @@ export function registerApiTriggers(
         typeof body.agentId === "string" && body.agentId.trim().length > 0
           ? (body.agentId as string).trim()
           : undefined;
+      const query = asNonEmptyString(body.query);
       const payload: {
         sessionId: string;
         project: string;
         budget?: number;
         agentId?: string;
+        query?: string;
       } = {
         sessionId,
         project,
@@ -427,6 +501,7 @@ export function registerApiTriggers(
       if (budget !== undefined) payload.budget = budget;
       const agentId = bodyAgentId ?? queryAgentId;
       if (agentId !== undefined) payload.agentId = agentId;
+      if (query !== undefined) payload.query = query;
       const result = await sdk.trigger({ function_id: "mem::context", payload });
       return { status_code: 200, body: result };
     },
@@ -765,11 +840,16 @@ export function registerApiTriggers(
       }
       await kv.set(KV.sessions, sessionId, session);
       const contextResult = await sdk.trigger<
-        { sessionId: string; project: string; agentId?: string },
+        { sessionId: string; project: string; agentId?: string; query?: string },
         { context: string; accounting?: ContextReductionAccounting }
       >({
         function_id: "mem::context",
-        payload: { sessionId, project, ...(agentId ? { agentId } : {}) },
+        payload: {
+          sessionId,
+          project,
+          ...(agentId ? { agentId } : {}),
+          ...(title ? { query: title } : {}),
+        },
       });
       return {
         status_code: 200,
@@ -1194,6 +1274,7 @@ export function registerApiTriggers(
         terms?: string[];
         toolName?: string;
         project?: string;
+        agentId?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1239,6 +1320,9 @@ export function registerApiTriggers(
           ...(req.body.terms !== undefined && { terms: req.body.terms }),
           ...(req.body.toolName !== undefined && { toolName: req.body.toolName }),
           ...(req.body.project !== undefined && { project: req.body.project }),
+          ...(typeof req.body.agentId === "string" && req.body.agentId.trim() && {
+            agentId: req.body.agentId.trim(),
+          }),
         },
       });
       return { status_code: 200, body: result };
@@ -1261,6 +1345,13 @@ export function registerApiTriggers(
         sourceObservationIds?: string[];
         project?: string;
         agentId?: string;
+        layer?: string;
+        epistemicState?: string;
+        temporal?: Record<string, unknown>;
+        authority?: Record<string, unknown>;
+        evidenceIds?: string[];
+        artifactIds?: string[];
+        experimentIds?: string[];
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1291,6 +1382,25 @@ export function registerApiTriggers(
           ...(typeof req.body.agentId === "string" && req.body.agentId.trim()
             ? { agentId: req.body.agentId.trim() }
             : {}),
+          ...(typeof req.body.layer === "string" && { layer: req.body.layer }),
+          ...(typeof req.body.epistemicState === "string" && {
+            epistemicState: req.body.epistemicState,
+          }),
+          ...(req.body.temporal &&
+            typeof req.body.temporal === "object" &&
+            !Array.isArray(req.body.temporal) && { temporal: req.body.temporal }),
+          ...(req.body.authority &&
+            typeof req.body.authority === "object" &&
+            !Array.isArray(req.body.authority) && { authority: req.body.authority }),
+          ...(Array.isArray(req.body.evidenceIds) && {
+            evidenceIds: req.body.evidenceIds,
+          }),
+          ...(Array.isArray(req.body.artifactIds) && {
+            artifactIds: req.body.artifactIds,
+          }),
+          ...(Array.isArray(req.body.experimentIds) && {
+            experimentIds: req.body.experimentIds,
+          }),
         },
       });
       return { status_code: 201, body: result };
@@ -1474,6 +1584,172 @@ export function registerApiTriggers(
     function_id: "api::smart-search",
     config: { api_path: "/agentmemory/smart-search", http_method: "POST" },
   });
+
+  registerWhitelistedPost(
+    "api::retrieval-plan",
+    "/agentmemory/retrieval/plan",
+    "mem::retrieval-plan",
+    ["query", "project", "agentId", "limit", "tokenBudget", "budgets"],
+    ["query"],
+  );
+  registerWhitelistedPost(
+    "api::retrieval-expand",
+    "/agentmemory/retrieval/expand",
+    "mem::retrieval-expand",
+    ["handle", "project", "agentId", "tokenBudget"],
+    ["handle"],
+  );
+
+  registerWhitelistedPost(
+    "api::evidence-write",
+    "/agentmemory/evidence",
+    "mem::evidence-write",
+    ["id", "kind", "type", "source", "locator", "content", "claim", "artifactId", "experimentId", "sourceIds", "provenance", "verifiedAt", "verifier", "verificationMethod", "metadata", "project", "agentId", "idempotencyKey"],
+    ["kind"],
+    201,
+  );
+  registerWhitelistedGet(
+    "api::evidence-list",
+    "/agentmemory/evidence",
+    "mem::evidence-list",
+    ["kind", "type", "project", "agentId", "limit"],
+  );
+  registerWhitelistedPost(
+    "api::evidence-search",
+    "/agentmemory/evidence/search",
+    "mem::evidence-query",
+    ["query", "kind", "type", "project", "agentId", "limit"],
+    ["query"],
+  );
+  registerWhitelistedPost(
+    "api::evidence-get",
+    "/agentmemory/evidence/get",
+    "mem::evidence-get",
+    ["id", "project", "agentId"],
+    ["id"],
+  );
+  registerWhitelistedPost(
+    "api::evidence-verify",
+    "/agentmemory/evidence/verify",
+    "mem::evidence-verify",
+    ["id", "verifier", "verificationMethod", "verifiedAt", "result", "project", "agentId"],
+    ["id", "verifier", "verificationMethod"],
+  );
+
+  registerWhitelistedPost(
+    "api::artifact-write",
+    "/agentmemory/artifacts",
+    "mem::artifact-write",
+    ["id", "name", "kind", "type", "path", "uri", "description", "digest", "hash", "size", "mediaType", "experimentIds", "evidenceIds", "provenance", "metadata", "project", "agentId", "idempotencyKey"],
+    ["name"],
+    201,
+  );
+  registerWhitelistedGet(
+    "api::artifact-list",
+    "/agentmemory/artifacts",
+    "mem::artifact-list",
+    ["kind", "type", "project", "agentId", "limit"],
+  );
+  registerWhitelistedPost(
+    "api::artifact-search",
+    "/agentmemory/artifacts/search",
+    "mem::artifact-query",
+    ["query", "kind", "type", "project", "agentId", "limit"],
+    ["query"],
+  );
+  registerWhitelistedPost(
+    "api::artifact-get",
+    "/agentmemory/artifacts/get",
+    "mem::artifact-get",
+    ["id", "project", "agentId"],
+    ["id"],
+  );
+
+  registerWhitelistedPost(
+    "api::experiment-create",
+    "/agentmemory/experiments",
+    "mem::experiment-create",
+    ["id", "title", "objective", "hypothesis", "environment", "sourceRevision", "revision", "toolchain", "commands", "inputs", "artifactIds", "observationIds", "evidenceIds", "actionIds", "sessionIds", "graphNodeIds", "negativeMemoryIds", "result", "conclusion", "followUp", "status", "provenance", "authority", "startedAt", "completedAt", "metadata", "project", "agentId", "idempotencyKey"],
+    ["objective"],
+    201,
+  );
+  registerWhitelistedGet(
+    "api::experiment-list",
+    "/agentmemory/experiments",
+    "mem::experiment-list",
+    ["status", "project", "agentId", "limit"],
+  );
+  registerWhitelistedPost(
+    "api::experiment-update",
+    "/agentmemory/experiments/update",
+    "mem::experiment-update",
+    ["id", "title", "objective", "hypothesis", "environment", "sourceRevision", "revision", "toolchain", "commands", "inputs", "artifactIds", "observationIds", "evidenceIds", "actionIds", "sessionIds", "graphNodeIds", "negativeMemoryIds", "result", "conclusion", "followUp", "status", "provenance", "authority", "startedAt", "completedAt", "metadata", "project", "agentId"],
+    ["id"],
+  );
+  registerWhitelistedPost(
+    "api::experiment-search",
+    "/agentmemory/experiments/search",
+    "mem::experiment-query",
+    ["query", "status", "project", "agentId", "limit"],
+    ["query"],
+  );
+  registerWhitelistedPost(
+    "api::experiment-get",
+    "/agentmemory/experiments/get",
+    "mem::experiment-get",
+    ["id", "project", "agentId"],
+    ["id"],
+  );
+  registerWhitelistedPost(
+    "api::experiment-expand",
+    "/agentmemory/experiments/expand",
+    "mem::experiment-expand",
+    ["id", "project", "agentId"],
+    ["id"],
+  );
+
+  registerWhitelistedPost(
+    "api::negative-memory-write",
+    "/agentmemory/negative-memories",
+    "mem::negative-memory-write",
+    ["id", "approach", "statement", "reason", "outcome", "status", "experimentIds", "evidenceIds", "environment", "sourceRevision", "validFrom", "validUntil", "confidence", "provenance", "metadata", "project", "agentId", "idempotencyKey"],
+    ["approach", "reason"],
+    201,
+  );
+  registerWhitelistedGet(
+    "api::negative-memory-list",
+    "/agentmemory/negative-memories",
+    "mem::negative-memory-list",
+    ["status", "environment", "sourceRevision", "asOf", "project", "agentId", "limit", "includeSuperseded", "includeExpired"],
+  );
+  registerWhitelistedPost(
+    "api::negative-memory-lookup",
+    "/agentmemory/negative-memories/lookup",
+    "mem::negative-memory-lookup",
+    ["query", "environment", "sourceRevision", "asOf", "project", "agentId", "limit", "includeSuperseded", "includeExpired"],
+    ["query"],
+  );
+
+  registerWhitelistedPost(
+    "api::temporal-memory-query",
+    "/agentmemory/memories/temporal-query",
+    "mem::temporal-memory-query",
+    ["id", "mode", "asOf", "from", "to", "range", "includeHistory", "project", "agentId"],
+  );
+  registerWhitelistedPost(
+    "api::temporal-graph-query",
+    "/agentmemory/graph/temporal-query",
+    "mem::temporal-query",
+    ["entityName", "asOf", "includeHistory"],
+    ["entityName"],
+  );
+  registerWhitelistedPost(
+    "api::conflict-resolve",
+    "/agentmemory/conflicts/resolve",
+    "mem::conflict-resolve",
+    ["conflictId", "status", "winnerMemoryId", "reason", "resolvedBy", "memoryStates", "resolution"],
+    ["conflictId", "status"],
+  );
 
   // #771: read-back endpoint for the followup-rate diagnostic. Returns
   // a directional signal — overcounts on legitimate query refinement —
@@ -1787,13 +2063,60 @@ export function registerApiTriggers(
   // unbounded kv.list. Operator-grade endpoint exposed for the viewer
   // banner action and CLI repair.
   sdk.registerFunction("api::graph-snapshot-rebuild",
-    async (req: ApiRequest): Promise<Response> => {
+    async (
+      req: ApiRequest<{
+        force?: boolean;
+        backfill?: boolean;
+        reset?: boolean;
+        pageSize?: number;
+        maxPages?: number;
+      }>,
+    ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       try {
+        if (req.body?.backfill === true) {
+          if (
+            req.body.reset !== undefined &&
+            typeof req.body.reset !== "boolean"
+          ) {
+            return { status_code: 400, body: { error: "reset must be boolean" } };
+          }
+          if (
+            req.body.pageSize !== undefined &&
+            (!Number.isInteger(req.body.pageSize) || req.body.pageSize < 1)
+          ) {
+            return {
+              status_code: 400,
+              body: { error: "pageSize must be a positive integer" },
+            };
+          }
+          if (
+            req.body.maxPages !== undefined &&
+            (!Number.isInteger(req.body.maxPages) || req.body.maxPages < 1)
+          ) {
+            return {
+              status_code: 400,
+              body: { error: "maxPages must be a positive integer" },
+            };
+          }
+          const result = await sdk.trigger({
+            function_id: "mem::graph-observation-index-backfill",
+            payload: {
+              reset: req.body.reset === true,
+              ...(req.body.pageSize !== undefined && {
+                pageSize: req.body.pageSize,
+              }),
+              ...(req.body.maxPages !== undefined && {
+                maxPages: req.body.maxPages,
+              }),
+            },
+          });
+          return { status_code: 200, body: result };
+        }
         const result = await sdk.trigger({
           function_id: "mem::graph-snapshot-rebuild",
-          payload: {},
+          payload: { force: req.body?.force === true },
         });
         return { status_code: 200, body: result };
       } catch {
@@ -3047,6 +3370,8 @@ export function registerApiTriggers(
       const sinceTime = since ? new Date(since).getTime() : 0;
       const df = <T>(items: T[], field: "updatedAt" | "createdAt") =>
         items.filter((i) => new Date((i as Record<string, unknown>)[field] as string).getTime() > sinceTime);
+      const structuredDf = <T extends { createdAt: string; updatedAt?: string }>(items: T[]) =>
+        items.filter((item) => new Date(item.updatedAt || item.createdAt).getTime() > sinceTime);
       let memories = await kv.list<import("../types.js").Memory>(KV.memories);
       let actions = await kv.list<import("../types.js").Action>(KV.actions);
       if (project) {
@@ -3057,6 +3382,22 @@ export function registerApiTriggers(
         memories: df(memories, "updatedAt"),
         actions: df(actions, "updatedAt"),
       };
+      let [evidence, artifacts, experiments, negativeMemories] = await Promise.all([
+        kv.list<import("../types.js").Evidence>(KV.evidence),
+        kv.list<import("../types.js").Artifact>(KV.artifacts),
+        kv.list<import("../types.js").Experiment>(KV.experiments),
+        kv.list<import("../types.js").NegativeMemory>(KV.negativeMemories),
+      ]);
+      if (project) {
+        evidence = evidence.filter((record) => record.project === project);
+        artifacts = artifacts.filter((record) => record.project === project);
+        experiments = experiments.filter((record) => record.project === project);
+        negativeMemories = negativeMemories.filter((record) => record.project === project);
+      }
+      body.evidence = structuredDf(evidence);
+      body.artifacts = structuredDf(artifacts);
+      body.experiments = structuredDf(experiments);
+      body.negativeMemories = structuredDf(negativeMemories);
       if (!project) {
         const semantic = await kv.list<import("../types.js").SemanticMemory>(KV.semantic);
         const procedural = await kv.list<import("../types.js").ProceduralMemory>(KV.procedural);

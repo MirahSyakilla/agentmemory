@@ -6,6 +6,12 @@ import { withKeyedLock } from "../state/keyed-mutex.js";
 import { safeAudit } from "./audit.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { logger } from "../logger.js";
+import {
+  createMemoryConflict,
+  registerTemporalMemoryFunctions,
+  validateMemoryMetadata,
+  type RichMemory,
+} from "./temporal-memory.js";
 
 function computeConfidence(
   source: Memory,
@@ -43,20 +49,26 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
       targetId: string;
       type: MemoryRelation["type"];
       confidence?: number;
+      evidenceIds?: string[];
+      artifactIds?: string[];
+      experimentIds?: string[];
     }) => {
       const [firstId, secondId] = [data.sourceId, data.targetId].sort();
       const lockKey =
         firstId === secondId ? `mem:${firstId}` : `mem:${firstId}:${secondId}`;
 
       return withKeyedLock(lockKey, async () => {
-        const source = await kv.get<Memory>(KV.memories, data.sourceId);
-        const target = await kv.get<Memory>(KV.memories, data.targetId);
+        const source = await kv.get<RichMemory>(KV.memories, data.sourceId);
+        const target = await kv.get<RichMemory>(KV.memories, data.targetId);
         if (!source || !target) {
           return {
             success: false,
             error: "source or target memory not found",
           };
         }
+
+        const metadata = validateMemoryMetadata(data);
+        if (metadata.error) return { success: false, error: metadata.error };
 
         const confidence =
           data.confidence !== undefined
@@ -90,11 +102,42 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
           targetUpdated = true;
         }
 
+        let conflict: Awaited<ReturnType<typeof createMemoryConflict>>["conflict"] | undefined;
+        if (data.type === "contradicts") {
+          const created = await createMemoryConflict(kv, source, target, {
+            evidenceIds: metadata.value?.evidenceIds,
+            artifactIds: metadata.value?.artifactIds,
+            experimentIds: metadata.value?.experimentIds,
+          });
+          conflict = created.conflict;
+          if (created.created) {
+            await safeAudit(kv, "conflict_create", "mem::relate", [conflict.id], {
+              sourceId: data.sourceId,
+              targetId: data.targetId,
+              evidenceIds: conflict.evidenceIds ?? [],
+            });
+          }
+
+          if (!source.conflictIds) source.conflictIds = [];
+          if (!source.conflictIds.includes(conflict.id)) {
+            source.conflictIds.push(conflict.id);
+            await kv.set(KV.memories, data.sourceId, source);
+            sourceUpdated = true;
+          }
+          if (!target.conflictIds) target.conflictIds = [];
+          if (!target.conflictIds.includes(conflict.id)) {
+            target.conflictIds.push(conflict.id);
+            await kv.set(KV.memories, data.targetId, target);
+            targetUpdated = true;
+          }
+        }
+
         await safeAudit(kv, "relation_create", "mem::relate", [relationId], {
           type: data.type,
           sourceId: data.sourceId,
           targetId: data.targetId,
           confidence,
+          ...(conflict ? { conflictId: conflict.id } : {}),
         });
         if (sourceUpdated) {
           await safeAudit(
@@ -121,7 +164,12 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
           source: data.sourceId,
           target: data.targetId,
         });
-        return { success: true, relationId, relation };
+        return {
+          success: true,
+          relationId,
+          relation,
+          ...(conflict ? { conflict, conflictId: conflict.id } : {}),
+        };
       });
     },
   );
@@ -275,4 +323,6 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
       return { results: result };
     },
   );
+
+  registerTemporalMemoryFunctions(sdk, kv);
 }

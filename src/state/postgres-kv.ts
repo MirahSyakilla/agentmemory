@@ -4,6 +4,7 @@ import { KV } from "./schema.js";
 import {
   applyJsonUpdate,
   type StateKVBackend,
+  type StateKVClaimResult,
   type StateKVJsonAggregateRequest,
   type StateKVJsonAggregateResult,
 } from "./backend-kv.js";
@@ -14,6 +15,8 @@ const GRAPH_SCOPES = new Set<string>([
   KV.graphNameIndex,
   KV.graphEdgeKey,
   KV.graphNodeDegree,
+  KV.graphObservationIndex,
+  KV.graphObservationIndexBackfill,
 ]);
 
 function clientConfig(config: PostgresConfig): pg.ClientConfig {
@@ -37,12 +40,14 @@ export class PostgresKVBackend implements StateKVBackend {
   private pool: pg.Pool;
   private ready: Promise<void> | null = null;
 
-  constructor(private config: PostgresConfig) {
-    this.pool = new pg.Pool({
-      ...clientConfig(config),
-      max: 10,
-      idleTimeoutMillis: 30_000,
-    });
+  constructor(config: PostgresConfig, pool?: pg.Pool) {
+    this.pool =
+      pool ??
+      new pg.Pool({
+        ...clientConfig(config),
+        max: 10,
+        idleTimeoutMillis: 30_000,
+      });
   }
 
   handles(scope: string): boolean {
@@ -73,6 +78,33 @@ export class PostgresKVBackend implements StateKVBackend {
       [scope, key, JSON.stringify(value)],
     );
     return value;
+  }
+
+  async claim<T = unknown>(
+    scope: string,
+    key: string,
+    value: T,
+  ): Promise<StateKVClaimResult<T>> {
+    await this.ensureReady();
+    const inserted = await this.pool.query(
+      `insert into agentmemory_kv(scope, key, value, updated_at)
+       values ($1, $2, $3::jsonb, now())
+       on conflict(scope, key) do nothing
+       returning value`,
+      [scope, key, JSON.stringify(value)],
+    );
+    if (inserted.rows.length > 0) {
+      return { claimed: true, value: inserted.rows[0].value as T };
+    }
+
+    const existing = await this.pool.query(
+      "select value from agentmemory_kv where scope = $1 and key = $2",
+      [scope, key],
+    );
+    return {
+      claimed: false,
+      value: (existing.rows[0]?.value as T | undefined) ?? null,
+    };
   }
 
   async update<T = unknown>(

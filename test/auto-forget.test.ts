@@ -95,7 +95,7 @@ describe("Auto-Forget Function", () => {
     expect(deleted).toBeNull();
   });
 
-  it("detects contradiction between very similar memories", async () => {
+  it("reports potential duplicates without retiring either memory", async () => {
     const mem1 = makeMemory({
       id: "mem_1",
       content: "Use React hooks for state management in all components",
@@ -110,16 +110,18 @@ describe("Auto-Forget Function", () => {
     await kv.set("mem:memories", "mem_2", mem2);
 
     const result = (await sdk.trigger("mem::auto-forget", {})) as {
-      contradictions: Array<{
+      potentialDuplicates: Array<{
         memoryA: string;
         memoryB: string;
         similarity: number;
       }>;
     };
 
-    expect(result.contradictions.length).toBe(1);
+    expect(result.potentialDuplicates.length).toBe(1);
     const older = await kv.get<Memory>("mem:memories", "mem_1");
-    expect(older!.isLatest).toBe(false);
+    const newer = await kv.get<Memory>("mem:memories", "mem_2");
+    expect(older!.isLatest).toBe(true);
+    expect(newer!.isLatest).toBe(true);
   });
 
   it("evicts low-value old observations", async () => {
@@ -265,9 +267,9 @@ describe("Auto-Forget Function", () => {
     await kv.set("mem:memories", "mem_2", mem2);
 
     const result = (await sdk.trigger("mem::auto-forget", {})) as {
-      contradictions: unknown[];
+      potentialDuplicates: unknown[];
     };
 
-    expect(result.contradictions.length).toBe(0);
+    expect(result.potentialDuplicates.length).toBe(0);
   });
 });

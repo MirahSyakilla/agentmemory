@@ -17,6 +17,7 @@ import {
 } from "../config.js";
 import { logger } from "../logger.js";
 import { getCounters } from "../telemetry/setup.js";
+import { retrievalResultMetadata } from "./retrieval-metadata.js";
 
 // #771: smart-search followup-rate diagnostic. Stored per session as
 // the most recent search payload, used to detect whether the next
@@ -110,6 +111,10 @@ export function registerSmartSearchFunction(
         typeof data.agentId === "string" && data.agentId.trim().length > 0
           ? data.agentId.trim()
           : undefined;
+      const projectFilter =
+        typeof data.project === "string" && data.project.trim().length > 0
+          ? data.project.trim()
+          : undefined;
       const wildcardAgent = explicitAgentId === "*";
       const envAgentId = isolated ? getAgentId() : undefined;
       const filterAgentId = wildcardAgent
@@ -156,24 +161,53 @@ export function registerSmartSearchFunction(
           if (r) expanded.push(r);
         }
 
-        const scoped = filterAgentId
-          ? expanded.filter((e) => e.observation.agentId === filterAgentId)
-          : expanded;
+        const scoped = expanded.filter((entry) => {
+          if (filterAgentId && entry.observation.agentId !== filterAgentId) {
+            return false;
+          }
+          return true;
+        });
+        const projectScoped = projectFilter
+          ? (await Promise.all(
+              scoped.map(async (entry) => {
+                const project = await observationProject(kv, entry.observation);
+                return project === undefined || project === projectFilter
+                  ? entry
+                  : null;
+              }),
+            )).filter(
+              (entry): entry is (typeof scoped)[number] => entry !== null,
+            )
+          : scoped;
 
         void recordAccessBatch(
           kv,
-          scoped.map((e) => e.observation.id),
+          projectScoped.map((e) => e.observation.id),
         );
 
         const truncated = data.expandIds.length > raw.length;
         logger.info("Smart search expanded", {
           requested: data.expandIds.length,
           attempted: raw.length,
-          returned: scoped.length,
-          filteredOutOfScope: expanded.length - scoped.length,
+          returned: projectScoped.length,
+          filteredOutOfScope: expanded.length - projectScoped.length,
           truncated,
         });
-        return { mode: "expanded", results: scoped, truncated };
+        const expandedWithMetadata = await Promise.all(
+          projectScoped.map(async (entry) => {
+            const memory = await kv.get<any>(KV.memories, entry.obsId).catch(() => null);
+            const metadata = await retrievalResultMetadata(kv, {
+              origin: memory?.origin ?? entry.observation.origin,
+              evidenceIds: memory?.evidenceIds,
+              scope: {
+                ...(projectFilter ? { project: projectFilter } : {}),
+                ...(filterAgentId ? { agentId: filterAgentId } : {}),
+              },
+            });
+            return metadata ? { ...entry, metadata } : entry;
+          }),
+        );
+        return { mode: "expanded", results: expandedWithMetadata, truncated };
       }
 
       if (!data.query || typeof data.query !== "string" || !data.query.trim()) {
@@ -192,31 +226,54 @@ export function registerSmartSearchFunction(
       // is a defensible middle ground: enough headroom for a small
       // workload, capped at 300 so a 100-limit request never asks for
       // thousands of hits.
-      const overFetchLimit = filterAgentId
+      const overFetchLimit = filterAgentId || projectFilter
         ? Math.min(limit * 3, 300)
         : limit;
 
       const [hybridResults, lessons] = await Promise.all([
         searchFn(data.query, overFetchLimit),
         includeLessons
-          ? recallLessons(sdk, data.query, lessonLimit, data.project)
+          ? recallLessons(sdk, data.query, lessonLimit, projectFilter)
           : Promise.resolve([]),
       ]);
 
-      const filteredHybrid = filterAgentId
-        ? hybridResults
-            .filter((r) => r.observation.agentId === filterAgentId)
-            .slice(0, limit)
-        : hybridResults.slice(0, limit);
+      const agentScopedHybrid = filterAgentId
+        ? hybridResults.filter((r) => r.observation.agentId === filterAgentId)
+        : hybridResults;
+      const projectScopedHybrid = projectFilter
+        ? (await Promise.all(
+            agentScopedHybrid.map(async (result) => {
+              const project = await observationProject(kv, result.observation);
+              return project === undefined || project === projectFilter ? result : null;
+            }),
+          )).filter(
+            (result): result is HybridSearchResult => result !== null,
+          )
+        : agentScopedHybrid;
+      const filteredHybrid = projectScopedHybrid.slice(0, limit);
 
-      const compact: CompactSearchResult[] = filteredHybrid.map((r) => ({
-        obsId: r.observation.id,
-        sessionId: r.sessionId,
-        title: r.observation.title,
-        type: r.observation.type,
-        score: r.combinedScore,
-        timestamp: r.observation.timestamp,
-      }));
+      const compact: CompactSearchResult[] = await Promise.all(
+        filteredHybrid.map(async (r) => {
+          const memory = await kv.get<any>(KV.memories, r.observation.id).catch(() => null);
+          const metadata = await retrievalResultMetadata(kv, {
+            origin: memory?.origin ?? r.observation.origin,
+            evidenceIds: memory?.evidenceIds,
+            scope: {
+              ...(projectFilter ? { project: projectFilter } : {}),
+              ...(filterAgentId ? { agentId: filterAgentId } : {}),
+            },
+          });
+          return {
+            obsId: r.observation.id,
+            sessionId: r.sessionId,
+            title: r.observation.title,
+            type: r.observation.type,
+            score: r.combinedScore,
+            timestamp: r.observation.timestamp,
+            ...(metadata ? { metadata } : {}),
+          };
+        }),
+      );
 
       void recordAccessBatch(
         kv,
@@ -299,24 +356,36 @@ async function recallLessons(
       payload: { query, limit, project },
     })) as { success?: boolean; lessons?: Array<Lesson & { score?: number }> };
     if (!result?.success || !Array.isArray(result.lessons)) return [];
-    return result.lessons.map((l) => ({
-      lessonId: l.id,
-      content:
-        l.content.length > LESSON_CONTENT_PREVIEW_CHARS
-          ? l.content.slice(0, LESSON_CONTENT_PREVIEW_CHARS) + "…"
-          : l.content,
-      confidence: l.confidence,
-      score: l.score ?? l.confidence,
-      createdAt: l.createdAt,
-      project: l.project,
-      tags: l.tags ?? [],
-    }));
+    return result.lessons
+      .filter((l) => project === undefined || l.project === undefined || l.project === project)
+      .map((l) => ({
+        lessonId: l.id,
+        content:
+          l.content.length > LESSON_CONTENT_PREVIEW_CHARS
+            ? l.content.slice(0, LESSON_CONTENT_PREVIEW_CHARS) + "…"
+            : l.content,
+        confidence: l.confidence,
+        score: l.score ?? l.confidence,
+        createdAt: l.createdAt,
+        project: l.project,
+        tags: l.tags ?? [],
+      }));
   } catch (err) {
     logger.warn("Smart search: mem::lesson-recall failed; returning empty lesson list", {
       error: err instanceof Error ? err.message : String(err),
     });
     return [];
   }
+}
+
+async function observationProject(
+  kv: StateKV,
+  observation: CompressedObservation,
+): Promise<string | undefined> {
+  const memory = await kv.get<{ project?: string }>(KV.memories, observation.id).catch(() => null);
+  if (memory?.project) return memory.project;
+  const session = await kv.get<{ project?: string }>(KV.sessions, observation.sessionId).catch(() => null);
+  return session?.project;
 }
 
 async function detectFollowup(

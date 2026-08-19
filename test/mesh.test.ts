@@ -14,6 +14,10 @@ import type {
   MemoryRelation,
   GraphNode,
   GraphEdge,
+  Evidence,
+  Artifact,
+  Experiment,
+  NegativeMemory,
 } from "../src/types.js";
 
 function mockKV() {
@@ -100,6 +104,10 @@ describe("Mesh Functions", () => {
         "relations",
         "graph:nodes",
         "graph:edges",
+        "evidence",
+        "artifacts",
+        "experiments",
+        "negative-memories",
       ]);
     });
 
@@ -528,6 +536,84 @@ describe("Mesh Functions", () => {
 
       expect(result.success).toBe(true);
       expect(result.accepted).toBe(0);
+    });
+
+    it("merges structured records, reconciles their links, and retains experiment authority", async () => {
+      const timestamp = "2026-08-19T00:00:00.000Z";
+      const provenance = { channel: "shared" as const, capturedAt: timestamp };
+      const evidence: Evidence = {
+        id: "evd_mesh",
+        kind: "log",
+        type: "log",
+        sourceIds: [],
+        provenance,
+        capturedAt: timestamp,
+        createdAt: timestamp,
+      };
+      const artifact: Artifact = {
+        id: "art_mesh",
+        name: "report.txt",
+        kind: "report",
+        type: "report",
+        experimentIds: [],
+        evidenceIds: [],
+        provenance,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      const experiment: Experiment = {
+        id: "exp_mesh",
+        objective: "Receive structured records",
+        commands: [],
+        inputs: [],
+        artifactIds: [artifact.id],
+        observationIds: [],
+        evidenceIds: [evidence.id],
+        negativeMemoryIds: ["neg_mesh"],
+        followUp: [],
+        status: "completed",
+        provenance,
+        authority: { source: "user", confidence: 1 },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      const negativeMemory: NegativeMemory = {
+        id: "neg_mesh",
+        approach: "skip mesh",
+        statement: "Skipping is invalid",
+        reason: "the linked experiment requires sync",
+        status: "invalid",
+        experimentIds: [],
+        evidenceIds: [],
+        confidence: 1,
+        provenance,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      const result = (await sdk.trigger("mem::mesh-receive", {
+        evidence: [evidence],
+        artifacts: [artifact],
+        experiments: [experiment],
+        negativeMemories: [negativeMemory],
+      })) as { success: boolean; accepted: number };
+      expect(result.success).toBe(true);
+      expect(result.accepted).toBe(4);
+      expect((await kv.get<Artifact>("mem:artifacts", artifact.id))?.experimentIds).toEqual([experiment.id]);
+      expect((await kv.get<Evidence>("mem:evidence", evidence.id))?.experimentId).toBe(experiment.id);
+      expect((await kv.get<NegativeMemory>("mem:negative-memories", negativeMemory.id))?.experimentIds).toEqual([experiment.id]);
+      expect((await kv.get<Experiment>("mem:experiments", experiment.id))?.authority).toEqual({ source: "user", confidence: 1 });
+
+      const stale = {
+        ...experiment,
+        authority: { source: "agent" as const, confidence: 0.1 },
+        updatedAt: "2026-08-18T00:00:00.000Z",
+      };
+      const staleResult = (await sdk.trigger("mem::mesh-receive", {
+        experiments: [stale],
+      })) as { accepted: number };
+      expect(staleResult.accepted).toBe(0);
+      expect((await kv.get<Experiment>("mem:experiments", experiment.id))?.authority).toEqual({ source: "user", confidence: 1 });
     });
   });
 

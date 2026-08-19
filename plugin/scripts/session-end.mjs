@@ -32,6 +32,19 @@ function hookCwd(data) {
 	const projectDir = process.env["DEVIN_PROJECT_DIR"] || process.env["CLAUDE_PROJECT_DIR"];
 	if (projectDir && projectDir.trim()) return projectDir;
 }
+function hookAgentId(data) {
+	const values = data ? [
+		data.agentId,
+		data.agent_id,
+		data.agentName,
+		data.agent_name
+	] : [];
+	values.push(process.env["AGENT_ID"]);
+	for (const value of values) if (typeof value === "string" && value.trim()) return value.trim().slice(0, 128);
+	if (process.env["OPENCODE"] === "1") return "opencode";
+	if (process.env["CODEX_THREAD_ID"]) return "codex";
+	if (process.env["CLAUDE_PROJECT_DIR"]) return "claude-code";
+}
 //#endregion
 //#region src/hooks/_env.ts
 const HOOK_ENV_KEYS = new Set([
@@ -39,6 +52,8 @@ const HOOK_ENV_KEYS = new Set([
 	"AGENTMEMORY_SECRET",
 	"AGENTMEMORY_INJECT_CONTEXT",
 	"AGENTMEMORY_PROJECT_NAME",
+	"AGENT_ID",
+	"AGENTMEMORY_AGENT_SCOPE",
 	"CLAUDE_MEMORY_BRIDGE"
 ]);
 let hookEnvLoaded = false;
@@ -122,6 +137,7 @@ async function main() {
 	if (!data || typeof data !== "object") return;
 	if (isSdkChildContext(data)) return;
 	const sessionId = data.session_id || data.sessionId || data.conversation_id || "unknown";
+	const agentId = hookAgentId(data);
 	const transcriptPrompts = extractTranscriptPrompts(data);
 	if (transcriptPrompts.length > 0) {
 		const cwd = hookCwd(data) || process.cwd();
@@ -136,6 +152,7 @@ async function main() {
 				project,
 				cwd,
 				timestamp,
+				...agentId ? { agentId } : {},
 				data: { prompt }
 			}),
 			signal: AbortSignal.timeout(3e3)

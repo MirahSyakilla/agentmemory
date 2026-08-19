@@ -7,11 +7,24 @@ This repository is a maintained fork of [rohitg00/agentmemory](https://github.co
 ## What It Does
 
 - Captures prompts, tool use, file work, session milestones, and explicit memory saves.
-- Searches memories through lexical, vector, and graph signals.
-- Serves 54 MCP tools. Its full MCP surface is 54 tools, 6 resources, 3 prompts, and 17 skills.
-- Exposes 133 endpoints on port `3111`, with the viewer on `127.0.0.1:3113`.
+- Plans task-aware retrieval across lexical, vector, graph, temporal, experiment, artifact, evidence, and negative-memory sources.
+- Serves 74 MCP tools. Its full MCP surface is 74 tools, 6 resources, 3 prompts, and 17 skills.
+- Exposes 156 endpoints on port `3111`, with the viewer on `127.0.0.1:3113`.
 - Supports Claude Code, Codex, OpenCode, Cursor, Copilot CLI, pi, Devin, Droid, Antigravity, and MCP-capable clients.
 - Keeps session history, lessons, relations, audit records, graph data, exports, and backups separate from the agent's working repository.
+
+## Planned Retrieval And Evidence
+
+Use `memory_retrieval_plan` or `POST /agentmemory/retrieval/plan` when context needs more than a keyword search. The deterministic planner identifies intent, named entities, temporal constraints, evidence needs, and excluded terms; then combines the available lexical/vector/graph/memory paths with first-class experiments, artifacts, typed evidence, temporal memory, and reusable negative knowledge.
+
+- Every plan accepts `project` and `agentId` scope and reports source coverage, temporal filtering, conflict warnings, negative-memory warnings, and a token ledger.
+- Returned context is partitioned into direct, supporting, historical, and provenance tiers. Omitted records get opaque, short-lived expansion handles from `memory_retrieval_expand` or `/agentmemory/retrieval/expand`.
+- Evidence records retain provenance, precise locator, linked artifacts/experiments, and verification method, verifier, result, and timestamp. Use `memory_evidence_verify` to persist verification rather than relying on an untracked assertion.
+- Experiments connect objective, hypothesis, environment, revision, toolchain, commands, inputs, actions, sessions, artifacts, observations, evidence, result, conclusion, and follow-up links.
+- Negative-memory records prevent blind retries of tested-invalid approaches and can be scoped by project, agent, environment, source revision, and validity interval.
+- Contradictions are durable conflict records. Resolve them explicitly with evidence and epistemic states; the system retains the conflicting evidence and historical records instead of silently deleting one side.
+
+Durable write idempotency is available for structured evidence, artifact, experiment, and negative-memory creates via `idempotencyKey`, `requestId`, or `fingerprint`. It requires this fork's mandatory PostgreSQL metadata backend; unsupported backends fail rather than emulating an unsafe read-then-write claim.
 
 ## Fork Versus Upstream
 
@@ -221,6 +234,42 @@ When authentication is enabled, add:
 -H "Authorization: Bearer $AGENTMEMORY_SECRET"
 ```
 
+## Graph Search Operations
+
+Smart search keeps graph enrichment enabled by default. Set
+`AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS` to tune its wall-clock budget; values are
+clamped to `100`-`250` ms and default to `200` ms. If Neo4j is slow, unavailable,
+or the targeted lookup exceeds the budget, BM25/vector results are returned
+without waiting for an unbounded graph scan.
+
+Legacy Neo4j corpora can rebuild the observation-to-node reverse index through
+bounded, resumable pages. The operation uses the existing snapshot-rebuild
+endpoint but does not run the unsafe full `kv.list` rebuild:
+
+```bash
+curl -X POST http://127.0.0.1:3111/agentmemory/graph/snapshot-rebuild \
+  -H 'Content-Type: application/json' \
+  -d '{"backfill":true,"pageSize":25,"maxPages":10}'
+```
+
+Repeat the request until the response contains `"complete":true`; the cursor
+is persisted server-side, so a retry resumes safely. `pageSize` is capped at
+25 nodes and `maxPages` at 10 per request. Use `{"reset":true}` only to restart
+the cursor; existing index rows are merged idempotently.
+
+### Neo4j Benchmark
+
+The corrected targeted path was benchmarked against the live Neo4j deployment on
+2026-08-20. The graph snapshot reported 15,172 nodes and 29,848 edges at the
+time of the end-to-end run.
+
+- Direct `React` entity retrieval with depth-2 neighborhood, 20 warm runs and a 200 ms graph budget: 20/20 completed without timeout; p50 `31.3` ms, p95 `49.0` ms, mean `35.2` ms; all runs returned five results with session IDs resolved.
+- The Neo4j reverse-index lookup plan uses `NodeUniqueIndexSeek`, rather than a graph-node label scan.
+- End-to-end `POST /agentmemory/smart-search` for `React`, limit 5, 20 warm requests: graph enabled p50 `1,157.4` ms, p95 `1,739.9` ms, mean `1,221.4` ms; graph-disabled control p50 `971.7` ms, p95 `1,529.0` ms, mean `1,056.7` ms.
+- The measured graph-enabled median overhead was `185.7` ms. This includes the full BM25, vector, enrichment, and HTTP path, not just Neo4j; the graph leg itself remained inside its 200 ms budget on the targeted benchmark.
+
+The result supports keeping corrected Neo4j as the current graph backend. FalkorDB is not being treated as a drop-in replacement; it should only be prototyped after an isolated quality and throughput comparison shows Neo4j still misses the operational target.
+
 ## Configuration Reference
 
 The full list is in [`.env.example`](.env.example). The settings most relevant to this fork are:
@@ -236,6 +285,7 @@ The full list is in [`.env.example`](.env.example). The settings most relevant t
 | `AGENTMEMORY_BLOB_ROOT` | Local blob directory |
 | `AGENTMEMORY_DATA_DIR` | Local base directory for runtime data, Tantivy, blobs, and snapshots |
 | `AGENTMEMORY_SECRET` | Bearer token used to protect the API and viewer integration |
+| `AGENTMEMORY_GRAPH_SEARCH_TIMEOUT_MS` | Graph enrichment budget in milliseconds, clamped to `100`-`250`, default `200` |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `MINIMAX_API_KEY` | Optional LLM provider keys |
 | `AGENTMEMORY_AUTO_COMPRESS` | Enable LLM compression when a provider is configured |
 | `AGENTMEMORY_INJECT_CONTEXT` | Enable hook-driven context injection |
