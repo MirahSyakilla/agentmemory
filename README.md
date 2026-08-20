@@ -26,22 +26,16 @@ The following results were measured against the live deployment after commit
 | Project-scoped live search for `agentmemory` | 10/10 results belonged to `agentmemory`; impossible project returned 0 |
 | Controlled index rebuild | 19,775 Tantivy entries and 19,775 Qdrant vectors |
 | Build | `npm run build` passed |
-| Retrieval test suite | 171 files passed, 1 skipped; 1,820 tests passed, 1 skipped |
-| Full `npm test` status | 3 isolated `test/fs-watcher.test.ts` failures; retrieval and all other tests passed |
+| Full `npm test` status | 172 files passed, 1 skipped; 1,836 tests passed, 1 skipped |
+| Filesystem watcher suite | 16 tests passed; event assertions use condition-based polling |
 
-The passing retrieval-focused verification used:
+The full verification used:
 
 ```bash
 TMPDIR="/home/meow/.cache/agentmemory-test-tmp" \
 PATH="/home/meow/.local/bin:/home/meow/.nvm/versions/node/v26.3.0/bin:$PATH" \
-npx vitest run --exclude test/integration.test.ts --exclude test/fs-watcher.test.ts
+npm test
 ```
-
-The three excluded filesystem-watcher failures were:
-
-- `emits a post_tool_use observation with HookPayload shape on write`
-- `emits changeKind=file_delete when a watched file is removed`
-- `attaches Bearer auth when a secret is configured`
 
 The pre-rebuild baseline and provider-latency breakdown are documented in the
 [detailed benchmark notes](#neo4j-benchmark) below.
