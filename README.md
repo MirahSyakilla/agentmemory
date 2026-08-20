@@ -13,6 +13,39 @@ This repository is a maintained fork of [rohitg00/agentmemory](https://github.co
 - Supports Claude Code, Codex, OpenCode, Cursor, Copilot CLI, pi, Devin, Droid, Antigravity, and MCP-capable clients.
 - Keeps session history, lessons, relations, audit records, graph data, exports, and backups separate from the agent's working repository.
 
+## Latest Benchmark And Verification
+
+The following results were measured against the live deployment after commit
+`18f8520`, the controlled Tantivy/Qdrant rebuild, and the PM2 reload on
+2026-08-20.
+
+| Check | Result |
+|---|---|
+| First post-reload `smart-search` request for `React` | `1,604.8` ms cache miss |
+| 20 subsequent `smart-search` requests, limit 5, lessons disabled | p50 `60.7` ms, p95 `211.6` ms, mean `73.9` ms, 20/20 successful |
+| Project-scoped live search for `agentmemory` | 10/10 results belonged to `agentmemory`; impossible project returned 0 |
+| Controlled index rebuild | 19,775 Tantivy entries and 19,775 Qdrant vectors |
+| Build | `npm run build` passed |
+| Retrieval test suite | 171 files passed, 1 skipped; 1,820 tests passed, 1 skipped |
+| Full `npm test` status | 3 isolated `test/fs-watcher.test.ts` failures; retrieval and all other tests passed |
+
+The passing retrieval-focused verification used:
+
+```bash
+TMPDIR="/home/meow/.cache/agentmemory-test-tmp" \
+PATH="/home/meow/.local/bin:/home/meow/.nvm/versions/node/v26.3.0/bin:$PATH" \
+npx vitest run --exclude test/integration.test.ts --exclude test/fs-watcher.test.ts
+```
+
+The three excluded filesystem-watcher failures were:
+
+- `emits a post_tool_use observation with HookPayload shape on write`
+- `emits changeKind=file_delete when a watched file is removed`
+- `attaches Bearer auth when a secret is configured`
+
+The pre-rebuild baseline and provider-latency breakdown are documented in the
+[detailed benchmark notes](#neo4j-benchmark) below.
+
 ## Planned Retrieval And Evidence
 
 Use `memory_retrieval_plan` or `POST /agentmemory/retrieval/plan` when context needs more than a keyword search. The deterministic planner identifies intent, named entities, temporal constraints, evidence needs, and excluded terms; then combines the available lexical/vector/graph/memory paths with first-class experiments, artifacts, typed evidence, temporal memory, and reusable negative knowledge.
