@@ -1,4 +1,4 @@
-import type { CompressedObservation } from "../types.js";
+import type { CompressedObservation, SearchScope } from "../types.js";
 import { stem } from "./stemmer.js";
 import { getSynonyms } from "./synonyms.js";
 import { segmentCjk, hasCjk } from "./cjk-segmenter.js";
@@ -8,6 +8,8 @@ interface IndexEntry {
   obsId: string;
   sessionId: string;
   termCount: number;
+  project?: string;
+  agentId?: string;
 }
 
 export class SearchIndex implements LexicalStore {
@@ -47,6 +49,8 @@ export class SearchIndex implements LexicalStore {
       obsId: obs.id,
       sessionId: obs.sessionId,
       termCount,
+      ...(obs.project ? { project: obs.project } : {}),
+      ...(obs.agentId ? { agentId: obs.agentId } : {}),
     });
     this.docTermCounts.set(obs.id, termFreq);
     this.totalDocLength += termCount;
@@ -97,13 +101,31 @@ export class SearchIndex implements LexicalStore {
   search(
     query: string,
     limit = 20,
+    scope?: SearchScope,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
     const rawTerms = this.tokenize(query.toLowerCase());
     if (rawTerms.length === 0) return [];
 
-    const N = this.entries.size;
+    const scopedEntries = scope
+      ? new Set(
+          [...this.entries.values()]
+            .filter(
+              (entry) =>
+                (!scope.project || entry.project === scope.project) &&
+                (!scope.agentId || entry.agentId === scope.agentId),
+            )
+            .map((entry) => entry.obsId),
+        )
+      : null;
+    const N = scopedEntries?.size ?? this.entries.size;
     if (N === 0) return [];
-    const avgDocLen = this.totalDocLength / N;
+    const scopedTotalDocLength = scopedEntries
+      ? [...scopedEntries].reduce(
+          (total, obsId) => total + (this.entries.get(obsId)?.termCount ?? 0),
+          0,
+        )
+      : this.totalDocLength;
+    const avgDocLen = scopedTotalDocLength / N;
 
     const queryTerms: Array<{ term: string; weight: number }> = [];
     const seen = new Set<string>();
@@ -126,10 +148,13 @@ export class SearchIndex implements LexicalStore {
     for (const { term, weight } of queryTerms) {
       const matchingDocs = this.invertedIndex.get(term);
       if (matchingDocs) {
-        const df = matchingDocs.size;
+        const df = scopedEntries
+          ? [...matchingDocs].filter((obsId) => scopedEntries.has(obsId)).length
+          : matchingDocs.size;
         const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
 
         for (const obsId of matchingDocs) {
+          if (scopedEntries && !scopedEntries.has(obsId)) continue;
           const entry = this.entries.get(obsId)!;
           const docTerms = this.docTermCounts.get(obsId);
           const tf = docTerms?.get(term) || 0;
@@ -151,10 +176,13 @@ export class SearchIndex implements LexicalStore {
         if (indexTerm === term) continue;
 
         const obsIds = this.invertedIndex.get(indexTerm)!;
-        const prefixDf = obsIds.size;
+        const prefixDf = scopedEntries
+          ? [...obsIds].filter((obsId) => scopedEntries.has(obsId)).length
+          : obsIds.size;
         const prefixIdf =
           Math.log((N - prefixDf + 0.5) / (prefixDf + 0.5) + 1) * 0.5;
         for (const obsId of obsIds) {
+          if (scopedEntries && !scopedEntries.has(obsId)) continue;
           const entry = this.entries.get(obsId)!;
           const docTerms = this.docTermCounts.get(obsId);
           const tf = docTerms?.get(indexTerm) || 0;

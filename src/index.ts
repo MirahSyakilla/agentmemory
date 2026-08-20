@@ -1,4 +1,5 @@
 import { registerWorker, TriggerAction } from "iii-sdk";
+import type { SearchScope } from "./types.js";
 import {
   hydrateProcessEnvFromFile,
   loadConfig,
@@ -507,8 +508,8 @@ async function main() {
     graphWeight,
   );
 
-  const hybridRanker = (query: string, limit: number) =>
-    hybridSearch.search(query, limit);
+  const hybridRanker = (query: string, limit: number, scope?: SearchScope) =>
+    hybridSearch.search(query, limit, scope);
   registerSmartSearchFunction(sdk, kv, hybridRanker);
   setHybridRanker(hybridRanker);
   registerPlannedRetrievalFunctions(sdk, kv);

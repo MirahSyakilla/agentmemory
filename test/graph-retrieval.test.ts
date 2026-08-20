@@ -182,6 +182,71 @@ describe("GraphRetrieval", () => {
     expect(results[0].obsId).toBe("obs_1");
   });
 
+  it("filters graph candidates by session scope before ranking", async () => {
+    const nodes = [
+      makeNode("n1", "React", "library", ["obs_in_scope"]),
+      makeNode("n2", "React", "library", ["obs_other"]),
+    ];
+    const observations: CompressedObservation[] = [
+      {
+        id: "obs_in_scope",
+        sessionId: "ses_scope",
+        timestamp: new Date().toISOString(),
+        type: "file_edit",
+        title: "Scoped React edit",
+        facts: [],
+        narrative: "Scoped React work",
+        concepts: ["react"],
+        files: [],
+        importance: 5,
+      },
+      {
+        id: "obs_other",
+        sessionId: "ses_other",
+        timestamp: new Date().toISOString(),
+        type: "file_edit",
+        title: "Other React edit",
+        facts: [],
+        narrative: "Other React work",
+        concepts: ["react"],
+        files: [],
+        importance: 5,
+      },
+    ];
+    const sessions: Session[] = [
+      {
+        id: "ses_scope",
+        project: "my-project",
+        cwd: "/repo",
+        startedAt: new Date().toISOString(),
+        status: "completed",
+        observationCount: 1,
+      },
+      {
+        id: "ses_other",
+        project: "other-project",
+        cwd: "/repo",
+        startedAt: new Date().toISOString(),
+        status: "completed",
+        observationCount: 1,
+      },
+    ];
+    const retrieval = new GraphRetrieval(
+      mockKV(nodes, [], observations, sessions) as never,
+    );
+
+    const results = await retrieval.searchByEntities(
+      ["React"],
+      2,
+      1,
+      { project: "my-project" },
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({ obsId: "obs_in_scope", sessionId: "ses_scope" }),
+    ]);
+  });
+
   it("resolves sessionId for legacy graph nodes by scanning observations (#925)", async () => {
     const nodes = [makeNode("n1", "React", "library", ["obs_1"])];
     const sessions: Session[] = [

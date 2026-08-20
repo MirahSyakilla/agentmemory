@@ -64,4 +64,41 @@ describe("TantivySearchIndex", () => {
     expect(index.has("obs_a")).toBe(false);
     expect(index.search("React auth", 10)).toEqual([]);
   });
+
+  it("filters scoped candidates before applying the result limit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmemory-tantivy-scope-"));
+    tempDirs.push(dir);
+    const index = new TantivySearchIndex({
+      path: dir,
+      heapSizeBytes: 16 * 1024 * 1024,
+      numThreads: 1,
+      maxEntries: 100,
+    });
+
+    for (let i = 0; i < 20; i++) {
+      index.add(
+        makeObs({
+          id: `other_${i}`,
+          title: `auth feature ${i}`,
+          project: "other-project",
+          agentId: "agent-other",
+        }),
+      );
+    }
+    index.add(
+      makeObs({
+        id: "in_scope",
+        title: "auth feature in scope",
+        project: "my-project",
+        agentId: "agent-a",
+      }),
+    );
+
+    expect(index.search("auth", 1, {
+      project: "my-project",
+      agentId: "agent-a",
+    })).toEqual([
+      expect.objectContaining({ obsId: "in_scope" }),
+    ]);
+  });
 });

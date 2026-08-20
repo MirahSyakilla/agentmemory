@@ -165,6 +165,7 @@ export function registerCompressFunction(
           ...(hasImage ? { modality: data.raw.modality } : {}),
           ...(imageDescription ? { imageDescription } : {}),
           ...(data.raw.imageData ? { imageRef: data.raw.imageData } : {}),
+          ...(data.raw.project ? { project: data.raw.project } : {}),
           ...(data.raw.agentId ? { agentId: data.raw.agentId } : {}),
           ...(data.raw.origin ? { origin: data.raw.origin } : {}),
         };
@@ -191,6 +192,7 @@ export function registerCompressFunction(
           compressed.sessionId,
           compressed.title + " " + (compressed.narrative || ""),
           { kind: "observation", logId: compressed.id },
+          { project: compressed.project, agentId: compressed.agentId },
         );
 
         const streamResults = await Promise.allSettled([

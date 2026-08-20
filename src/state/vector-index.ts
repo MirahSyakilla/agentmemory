@@ -1,3 +1,5 @@
+import type { SearchScope } from "../types.js";
+
 // Pass byteOffset + byteLength explicitly so the round-trip survives
 // Node's Buffer pool. Buffer.from(b64, "base64") returns a slice of a
 // shared 8KB pool (poolSize), and `new Float32Array(buf.buffer)` ignores
@@ -37,6 +39,8 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 type VectorEntry = {
   embedding: Float32Array;
   sessionId: string;
+  project?: string;
+  agentId?: string;
 };
 
 export class VectorIndex {
@@ -50,11 +54,21 @@ export class VectorIndex {
         : Number.POSITIVE_INFINITY;
   }
 
-  add(obsId: string, sessionId: string, embedding: Float32Array): void {
+  add(
+    obsId: string,
+    sessionId: string,
+    embedding: Float32Array,
+    scope?: SearchScope,
+  ): void {
     if (this.vectors.has(obsId)) {
       this.vectors.delete(obsId);
     }
-    this.vectors.set(obsId, { embedding, sessionId });
+    this.vectors.set(obsId, {
+      embedding,
+      sessionId,
+      ...(scope?.project ? { project: scope.project } : {}),
+      ...(scope?.agentId ? { agentId: scope.agentId } : {}),
+    });
     while (this.vectors.size > this.maxEntries) {
       const oldest = this.vectors.keys().next().value;
       if (!oldest) break;
@@ -69,6 +83,7 @@ export class VectorIndex {
   search(
     query: Float32Array,
     limit = 20,
+    scope?: SearchScope,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
     const results: Array<{
       obsId: string;
@@ -78,6 +93,13 @@ export class VectorIndex {
     let minScore = -Infinity;
 
     for (const [obsId, entry] of this.vectors) {
+      if (
+        scope &&
+        ((scope.project && entry.project !== scope.project) ||
+          (scope.agentId && entry.agentId !== scope.agentId))
+      ) {
+        continue;
+      }
       const score = cosineSimilarity(query, entry.embedding);
       if (results.length < limit) {
         results.push({ obsId, sessionId: entry.sessionId, score });
@@ -134,18 +156,26 @@ export class VectorIndex {
     >;
     this.vectors = new Map();
     for (const [obsId, entry] of src) {
-      this.add(obsId, entry.sessionId, new Float32Array(entry.embedding));
+      this.add(obsId, entry.sessionId, new Float32Array(entry.embedding), {
+        ...(entry.project ? { project: entry.project } : {}),
+        ...(entry.agentId ? { agentId: entry.agentId } : {}),
+      });
     }
   }
 
   serialize(): string {
-    const data: Array<[string, { embedding: string; sessionId: string }]> = [];
+    const data: Array<[
+      string,
+      { embedding: string; sessionId: string; project?: string; agentId?: string },
+    ]> = [];
     for (const [obsId, entry] of this.vectors) {
       data.push([
         obsId,
         {
           embedding: float32ToBase64(entry.embedding),
           sessionId: entry.sessionId,
+          ...(entry.project ? { project: entry.project } : {}),
+          ...(entry.agentId ? { agentId: entry.agentId } : {}),
         },
       ]);
     }
@@ -174,6 +204,12 @@ export class VectorIndex {
         idx.vectors.set(obsId, {
           embedding: base64ToFloat32(entry.embedding),
           sessionId: entry.sessionId,
+          ...(typeof entry.project === "string"
+            ? { project: entry.project }
+            : {}),
+          ...(typeof entry.agentId === "string"
+            ? { agentId: entry.agentId }
+            : {}),
         });
       } catch {
         continue;

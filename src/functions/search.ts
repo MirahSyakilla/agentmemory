@@ -229,6 +229,7 @@ export async function vectorIndexAddBatchGuarded(
     id: string
     sessionId: string
     text: string
+    scope?: SearchScope
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }>,
 ): Promise<{ ok: number; fail: number }> {
@@ -264,6 +265,7 @@ export async function vectorIndexAddBatchGuarded(
     obsId: string
     sessionId: string
     embedding: Float32Array
+    scope?: SearchScope
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }> = []
   let fail = 0
@@ -285,6 +287,7 @@ export async function vectorIndexAddBatchGuarded(
       obsId: item.id,
       sessionId: item.sessionId,
       embedding,
+      ...(item.scope ? { scope: item.scope } : {}),
       context: item.context,
     })
   }
@@ -294,16 +297,17 @@ export async function vectorIndexAddBatchGuarded(
   try {
     if (vi.addBatch) {
       const result = await vi.addBatch(
-        validItems.map(({ obsId, sessionId, embedding }) => ({
+        validItems.map(({ obsId, sessionId, embedding, scope }) => ({
           obsId,
           sessionId,
           embedding,
+          ...(scope ? { scope } : {}),
         })),
       )
       return { ok: result.ok, fail: fail + result.fail }
     }
     for (const item of validItems) {
-      await vi.add(item.obsId, item.sessionId, item.embedding)
+      await vi.add(item.obsId, item.sessionId, item.embedding, item.scope)
     }
     return { ok: validItems.length, fail }
   } catch (err) {
@@ -350,6 +354,7 @@ export async function indexRecords(
     id: string
     sessionId: string
     text: string
+    scope?: SearchScope
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }
   const pending: EmbedJob[] = []
@@ -373,6 +378,7 @@ export async function indexRecords(
       id: memory.id,
       sessionId: memory.sessionIds?.[0] ?? 'memory',
       text: memory.title + ' ' + memory.content,
+      scope: { project: memory.project, agentId: memory.agentId },
       context: { kind: "memory", logId: memory.id },
     })
     count++
@@ -384,6 +390,7 @@ export async function indexRecords(
       id: obs.id,
       sessionId: obs.sessionId,
       text: obs.title + ' ' + obs.narrative,
+      scope: { project: obs.project, agentId: obs.agentId },
       context: { kind: "observation", logId: obs.id },
     })
     count++
@@ -468,21 +475,36 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
       batch += 10
     ) {
       const chunk = plannedSessions.slice(batch, batch + 10)
-    const results = await Promise.all(
-      chunk.map(async (s) => {
-        try {
-          return await kv.list<CompressedObservation>(KV.observations(s.id))
-        } catch {
-          failedSessions.push(s.id)
-          return [] as CompressedObservation[]
-        }
-      })
-    )
+      const results = await Promise.all(
+        chunk.map(async (s) => {
+          try {
+            return {
+              session: s,
+              observations: await kv.list<CompressedObservation>(
+                KV.observations(s.id),
+              ),
+            }
+          } catch {
+            failedSessions.push(s.id)
+            return { session: s, observations: [] as CompressedObservation[] }
+          }
+        }),
+      )
       const remaining = Number.isFinite(maxItems)
         ? Math.max(0, maxItems - indexed)
         : Number.POSITIVE_INFINITY
       const chunkObs = results
-        .flat()
+        .flatMap(({ session, observations }) =>
+          observations.map((obs) => ({
+            ...obs,
+            ...(obs.project || !session.project
+              ? {}
+              : { project: session.project }),
+            ...(obs.agentId || !session.agentId
+              ? {}
+              : { agentId: session.agentId }),
+          })),
+        )
         .filter((obs) => Boolean(obs.title) && Boolean(obs.narrative))
         .slice(0, remaining)
       if (chunkObs.length > 0) {

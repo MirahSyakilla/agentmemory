@@ -18,6 +18,8 @@ export interface GraphRetrievalResult {
 export interface GraphRetrievalOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  project?: string;
+  agentId?: string;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -55,6 +57,7 @@ function buildGraphContext(
 
 export class GraphRetrieval {
   private obsSessionCache: Map<string, string | null> | null = null;
+  private sessionScopeCache = new Map<string, Session | null>();
 
   constructor(private kv: StateKV) {}
 
@@ -96,6 +99,26 @@ export class GraphRetrieval {
     if (direct) return direct;
     const sessionIndex = await this.loadObservationSessionIndex(options);
     return sessionIndex.get(obsId) ?? "";
+  }
+
+  private async matchesScope(
+    sessionId: string,
+    options: GraphRetrievalOptions,
+  ): Promise<boolean> {
+    if (!options.project && !options.agentId) return true;
+    if (!sessionId) return false;
+    if (!this.sessionScopeCache.has(sessionId)) {
+      this.sessionScopeCache.set(
+        sessionId,
+        await this.kv.get<Session>(KV.sessions, sessionId).catch(() => null),
+      );
+    }
+    const session = this.sessionScopeCache.get(sessionId);
+    return Boolean(
+      session &&
+        (!options.project || session.project === options.project) &&
+        (!options.agentId || session.agentId === options.agentId),
+    );
   }
 
   private async resultFor(
@@ -261,34 +284,36 @@ export class GraphRetrieval {
         for (const obsId of lastNode.sourceObservationIds ?? []) {
           throwIfAborted(options.signal);
           if (visitedObs.has(obsId)) continue;
-          visitedObs.add(obsId);
-          results.push(
-            await this.resultFor(
-              lastNode,
-              obsId,
-              this.scorePath(path, mode),
-              buildGraphContext(path),
-              path.length,
-              options,
-            ),
+          const result = await this.resultFor(
+            lastNode,
+            obsId,
+            this.scorePath(path, mode),
+            buildGraphContext(path),
+            path.length,
+            options,
           );
+          if (await this.matchesScope(result.sessionId, options)) {
+            visitedObs.add(obsId);
+            results.push(result);
+          }
         }
       }
       if (mode === "entity") {
         for (const obsId of actualStart.sourceObservationIds ?? []) {
           throwIfAborted(options.signal);
           if (visitedObs.has(obsId)) continue;
-          visitedObs.add(obsId);
-          results.push(
-            await this.resultFor(
-              actualStart,
-              obsId,
-              1,
-              `[${actualStart.type}] ${actualStart.name}`,
-              0,
-              options,
-            ),
+          const result = await this.resultFor(
+            actualStart,
+            obsId,
+            1,
+            `[${actualStart.type}] ${actualStart.name}`,
+            0,
+            options,
           );
+          if (await this.matchesScope(result.sessionId, options)) {
+            visitedObs.add(obsId);
+            results.push(result);
+          }
         }
       }
     }

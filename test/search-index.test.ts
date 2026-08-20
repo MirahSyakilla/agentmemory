@@ -99,6 +99,31 @@ describe("SearchIndex", () => {
     expect(index.search("auth", 5).length).toBe(5);
   });
 
+  it("filters by scope before applying the result limit", () => {
+    for (let i = 0; i < 20; i++) {
+      index.add(
+        makeObs({
+          id: `other_${i}`,
+          title: `auth feature ${i}`,
+          project: "other-project",
+          agentId: "agent-other",
+        }),
+      );
+    }
+    index.add(
+      makeObs({
+        id: "in_scope",
+        title: "auth feature in scope",
+        project: "my-project",
+        agentId: "agent-a",
+      }),
+    );
+
+    expect(index.search("auth", 1, { project: "my-project", agentId: "agent-a" })).toEqual([
+      expect.objectContaining({ obsId: "in_scope" }),
+    ]);
+  });
+
   it("clears the index", () => {
     index.add(makeObs());
     index.clear();

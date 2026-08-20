@@ -259,14 +259,37 @@ the cursor; existing index rows are merged idempotently.
 
 ### Neo4j Benchmark
 
-The corrected targeted path was benchmarked against the live Neo4j deployment on
+The corrected targeted path was benchmarked against the live deployment on
 2026-08-20. The graph snapshot reported 15,172 nodes and 29,848 edges at the
-time of the end-to-end run.
+time of the original end-to-end run.
 
 - Direct `React` entity retrieval with depth-2 neighborhood, 20 warm runs and a 200 ms graph budget: 20/20 completed without timeout; p50 `31.3` ms, p95 `49.0` ms, mean `35.2` ms; all runs returned five results with session IDs resolved.
 - The Neo4j reverse-index lookup plan uses `NodeUniqueIndexSeek`, rather than a graph-node label scan.
 - End-to-end `POST /agentmemory/smart-search` for `React`, limit 5, 20 warm requests: graph enabled p50 `1,157.4` ms, p95 `1,739.9` ms, mean `1,221.4` ms; graph-disabled control p50 `971.7` ms, p95 `1,529.0` ms, mean `1,056.7` ms.
 - The measured graph-enabled median overhead was `185.7` ms. This includes the full BM25, vector, enrichment, and HTTP path, not just Neo4j; the graph leg itself remained inside its 200 ms budget on the targeted benchmark.
+- Pre-rebuild live rerun on 2026-08-20: 20 warm sequential `POST /agentmemory/smart-search` requests for `React`, limit 5, with lessons disabled returned p50 `945.6` ms, p95 `1,091.5` ms, mean `962.0` ms, and no HTTP errors.
+- The matching provider split over five live samples measured OpenAI query embedding at mean `970.9` ms for 1,024 dimensions and Qdrant search at mean `5.6` ms; combined embedding plus Qdrant mean was `976.5` ms. These are the pre-rebuild baseline numbers for the scope-aware retrieval and query-embedding-cache rollout.
+
+### Scope-Aware Index Rebuild
+
+After the benchmark above, the persisted Tantivy and Qdrant indexes were rebuilt
+with the scope metadata required by project- and agent-filtered retrieval. The
+controlled maintenance runner is:
+
+```bash
+REBUILD_EMBED_BATCH_SIZE=128 \
+  node --import tsx scripts/controlled-rebuild.mts
+```
+
+Stop the live `agentmemory` worker before running it and start the worker again
+only after the command prints its `phase: "complete"` record. The runner checks
+that PostgreSQL, Neo4j, Tantivy, and Qdrant are the active backends, clears both
+search indexes, rebuilds them from durable metadata, and prints preflight and
+postflight counts. The 2026-08-20 rebuild processed `517` sessions, `523,322`
+observations, and `876` memories, producing `19,775` Tantivy entries and
+`19,775` Qdrant vectors. Three sessions above the `5,000`-observation safety
+bound were skipped; the configured `20,000` search-index cap also limits the
+rebuild below the full `472,698` eligible-record corpus.
 
 The result supports keeping corrected Neo4j as the current graph backend. FalkorDB is not being treated as a drop-in replacement; it should only be prototyped after an isolated quality and throughput comparison shows Neo4j still misses the operational target.
 

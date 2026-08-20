@@ -239,6 +239,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           memory.sessionIds?.[0] ?? "memory",
           memory.title + " " + memory.content,
           { kind: "memory", logId: memory.id },
+          { project: memory.project, agentId: memory.agentId },
         );
 
         if (supersededId) {

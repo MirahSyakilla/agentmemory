@@ -282,6 +282,7 @@ export interface RawObservation {
   raw: unknown;
   modality?: "text" | "image" | "mixed";
   imageData?: string;
+  project?: string;
   agentId?: string;
   origin?: Origin;
 }
@@ -303,8 +304,14 @@ export interface CompressedObservation {
   imageData?: string;
   imageDescription?: string;
   modality?: "text" | "image" | "mixed";
+  project?: string;
   agentId?: string;
   origin?: Origin;
+}
+
+export interface SearchScope {
+  project?: string;
+  agentId?: string;
 }
 
 export type ObservationType =

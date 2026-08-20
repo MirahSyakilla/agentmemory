@@ -569,6 +569,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
         await Promise.all(
           parsed.observations.map(async (obs) => {
             const synthetic = buildSyntheticCompression(obs);
+            if (parsed.project) synthetic.project = parsed.project;
             synthetic.origin = importOrigin(
               synthetic.origin,
               synthetic.timestamp,

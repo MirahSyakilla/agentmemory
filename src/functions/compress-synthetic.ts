@@ -239,6 +239,7 @@ export function buildSyntheticCompression(
   };
   if (raw.modality) result.modality = raw.modality;
   if (raw.imageData) result.imageData = raw.imageData;
+  if (raw.project) result.project = raw.project;
   if (raw.agentId) result.agentId = raw.agentId;
   if (raw.origin) result.origin = raw.origin;
   return result;

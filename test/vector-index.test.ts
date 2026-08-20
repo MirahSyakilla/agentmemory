@@ -28,6 +28,26 @@ describe("VectorIndex", () => {
     expect(results).toEqual([]);
   });
 
+  it("filters by project and agent before applying the result limit", () => {
+    for (let i = 0; i < 20; i++) {
+      index.add(`other_${i}`, "ses_other", new Float32Array([1, 0, 0]), {
+        project: "other-project",
+        agentId: "agent-other",
+      });
+    }
+    index.add("in_scope", "ses_scope", new Float32Array([1, 0, 0]), {
+      project: "my-project",
+      agentId: "agent-a",
+    });
+
+    expect(index.search(new Float32Array([1, 0, 0]), 1, {
+      project: "my-project",
+      agentId: "agent-a",
+    })).toEqual([
+      expect.objectContaining({ obsId: "in_scope" }),
+    ]);
+  });
+
   it("returns results sorted by cosine similarity", () => {
     index.add("obs_close", "ses_1", new Float32Array([1, 0, 0]));
     index.add("obs_far", "ses_1", new Float32Array([0, 1, 0]));

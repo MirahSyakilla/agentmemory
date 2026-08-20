@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { SearchScope } from "../types.js";
 import type { VectorSearchHit, VectorStore } from "./vector-store.js";
 
 interface QdrantVectorStoreOptions {
@@ -54,8 +55,9 @@ export class QdrantVectorStore implements VectorStore {
     obsId: string,
     sessionId: string,
     embedding: Float32Array,
+    scope?: SearchScope,
   ): Promise<void> {
-    await this.addBatch([{ obsId, sessionId, embedding }]);
+    await this.addBatch([{ obsId, sessionId, embedding, scope }]);
   }
 
   async addBatch(
@@ -63,6 +65,7 @@ export class QdrantVectorStore implements VectorStore {
       obsId: string;
       sessionId: string;
       embedding: Float32Array;
+      scope?: SearchScope;
     }>,
   ): Promise<{ ok: number; fail: number }> {
     if (items.length === 0) return { ok: 0, fail: 0 };
@@ -74,6 +77,8 @@ export class QdrantVectorStore implements VectorStore {
       payload: {
         obsId: item.obsId,
         sessionId: item.sessionId,
+        ...(item.scope?.project ? { project: item.scope.project } : {}),
+        ...(item.scope?.agentId ? { agentId: item.scope.agentId } : {}),
       },
     }));
 
@@ -96,7 +101,11 @@ export class QdrantVectorStore implements VectorStore {
     this.cachedSize = Math.max(0, this.cachedSize - 1);
   }
 
-  async search(query: Float32Array, limit = 20): Promise<VectorSearchHit[]> {
+  async search(
+    query: Float32Array,
+    limit = 20,
+    scope?: SearchScope,
+  ): Promise<VectorSearchHit[]> {
     await this.ensureReady();
     const data = await this.request<
       Array<{ score?: number; payload?: Record<string, unknown> }>
@@ -107,6 +116,20 @@ export class QdrantVectorStore implements VectorStore {
         vector: vectorToArray(query),
         limit,
         with_payload: true,
+        ...(scope && (scope.project || scope.agentId)
+          ? {
+              filter: {
+                must: [
+                  ...(scope.project
+                    ? [{ key: "project", match: { value: scope.project } }]
+                    : []),
+                  ...(scope.agentId
+                    ? [{ key: "agentId", match: { value: scope.agentId } }]
+                    : []),
+                ],
+              },
+            }
+          : {}),
       },
     );
 
@@ -155,6 +178,16 @@ export class QdrantVectorStore implements VectorStore {
       }
       this.cachedSize =
         existing.result.points_count ?? existing.result.vectors_count ?? 0;
+      await Promise.allSettled([
+        this.request("PUT", `${path}/index`, {
+          field_name: "project",
+          field_schema: "keyword",
+        }),
+        this.request("PUT", `${path}/index`, {
+          field_name: "agentId",
+          field_schema: "keyword",
+        }),
+      ]);
       return;
     }
 
@@ -165,6 +198,16 @@ export class QdrantVectorStore implements VectorStore {
       },
     });
     this.cachedSize = 0;
+    await Promise.allSettled([
+      this.request("PUT", `${path}/index`, {
+        field_name: "project",
+        field_schema: "keyword",
+      }),
+      this.request("PUT", `${path}/index`, {
+        field_name: "agentId",
+        field_schema: "keyword",
+      }),
+    ]);
   }
 
   private async request<T>(

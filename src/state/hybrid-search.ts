@@ -5,6 +5,7 @@ import type {
   CompressedObservation,
   Memory,
   QueryExpansion,
+  SearchScope,
 } from "../types.js";
 import { memoryToObservation } from "./memory-utils.js";
 import type { StateKV } from "./kv.js";
@@ -99,6 +100,16 @@ class GraphSearchDeadline {
 export class HybridSearch {
   private graphRetrieval: GraphRetrieval;
   private graphEnabled: boolean;
+  private readonly queryEmbeddingCache = new Map<
+    string,
+    { provider: string; embedding: Float32Array; expiresAt: number }
+  >();
+  private readonly queryEmbeddingInFlight = new Map<
+    string,
+    Promise<Float32Array>
+  >();
+  private readonly queryEmbeddingCacheTtlMs = 5 * 60 * 1000;
+  private readonly queryEmbeddingCacheMaxEntries = 256;
 
   constructor(
     private bm25: LexicalStore,
@@ -114,14 +125,19 @@ export class HybridSearch {
     this.graphEnabled = isSmartSearchGraphEnabled();
   }
 
-  async search(query: string, limit = 20): Promise<HybridSearchResult[]> {
-    return this.tripleStreamSearch(query, limit);
+  async search(
+    query: string,
+    limit = 20,
+    scope?: SearchScope,
+  ): Promise<HybridSearchResult[]> {
+    return this.tripleStreamSearch(query, limit, undefined, scope);
   }
 
   async searchWithExpansion(
     query: string,
     limit: number,
     expansion: QueryExpansion,
+    scope?: SearchScope,
   ): Promise<HybridSearchResult[]> {
     const allQueries = [
       query,
@@ -135,7 +151,9 @@ export class HybridSearch {
     ];
 
     const resultSets = await Promise.all(
-      allQueries.map((q) => this.tripleStreamSearch(q, limit, allEntities)),
+      allQueries.map((q) =>
+        this.tripleStreamSearch(q, limit, allEntities, scope),
+      ),
     );
 
     const merged = new Map<string, HybridSearchResult>();
@@ -165,6 +183,7 @@ export class HybridSearch {
     query: string,
     limit: number,
     entityHints?: string[],
+    scope?: SearchScope,
   ): Promise<HybridSearchResult[]> {
     const graphDeadline = this.graphEnabled
       ? new GraphSearchDeadline(getGraphSearchTimeoutMs())
@@ -175,7 +194,7 @@ export class HybridSearch {
         : extractEntitiesFromQuery(query);
 
     try {
-      const bm25Promise = this.bm25.search(query, limit * 2);
+      const bm25Promise = this.bm25.search(query, limit * 2, scope);
       const vectorPromise = (async () => {
         if (!this.vector || !this.embeddingProvider) {
           return [] as Array<{
@@ -185,8 +204,8 @@ export class HybridSearch {
           }>;
         }
         try {
-          const queryEmbedding = await this.embeddingProvider.embed(query);
-          return await this.vector.search(queryEmbedding, limit * 2);
+          const queryEmbedding = await this.getQueryEmbedding(query);
+          return await this.vector.search(queryEmbedding, limit * 2, scope);
         } catch {
           // fall through to BM25-only
           return [];
@@ -202,6 +221,8 @@ export class HybridSearch {
               this.graphRetrieval.searchByEntities(entities, 2, limit, {
                 timeoutMs: getGraphSearchTimeoutMs(),
                 signal,
+                project: scope?.project,
+                agentId: scope?.agentId,
               }),
             )
           : Promise.resolve([] as GraphRetrievalResult[]);
@@ -220,6 +241,8 @@ export class HybridSearch {
             this.graphRetrieval.expandFromChunks(topVectorObs, 1, 5, {
               timeoutMs: getGraphSearchTimeoutMs(),
               signal,
+              project: scope?.project,
+              agentId: scope?.agentId,
             }),
         );
         if (expansionResults) {
@@ -357,6 +380,50 @@ export class HybridSearch {
     } finally {
       graphDeadline?.close();
     }
+  }
+
+  private async getQueryEmbedding(query: string): Promise<Float32Array> {
+    if (!this.embeddingProvider) {
+      throw new Error("embedding provider unavailable");
+    }
+    const now = Date.now();
+    const key = query.trim().replace(/\s+/g, " ").toLowerCase();
+    const providerKey = `${this.embeddingProvider.name}:${this.embeddingProvider.dimensions}`;
+    const inFlightKey = `${providerKey}\0${key}`;
+    const cached = this.queryEmbeddingCache.get(key);
+    if (
+      cached &&
+      cached.provider === providerKey &&
+      cached.expiresAt > now
+    ) {
+      return cached.embedding;
+    }
+    const inFlight = this.queryEmbeddingInFlight.get(inFlightKey);
+    if (inFlight) return inFlight;
+
+    const pending = this.embeddingProvider
+      .embed(query)
+      .then((embedding) => {
+        this.queryEmbeddingCache.delete(key);
+        this.queryEmbeddingCache.set(key, {
+          provider: providerKey,
+          embedding,
+          expiresAt: now + this.queryEmbeddingCacheTtlMs,
+        });
+        while (
+          this.queryEmbeddingCache.size > this.queryEmbeddingCacheMaxEntries
+        ) {
+          const oldest = this.queryEmbeddingCache.keys().next().value;
+          if (!oldest) break;
+          this.queryEmbeddingCache.delete(oldest);
+        }
+        return embedding;
+      })
+      .finally(() => {
+        this.queryEmbeddingInFlight.delete(inFlightKey);
+      });
+    this.queryEmbeddingInFlight.set(inFlightKey, pending);
+    return pending;
   }
 
   private diversifyBySession(

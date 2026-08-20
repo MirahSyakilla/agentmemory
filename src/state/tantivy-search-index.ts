@@ -1,15 +1,20 @@
 import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   Document,
   Index,
+  Occur,
+  Query,
   SchemaBuilder,
   type SearchHit,
 } from "@oxdev03/node-tantivy-binding";
-import type { CompressedObservation } from "../types.js";
+import type { CompressedObservation, SearchScope } from "../types.js";
 import { SearchIndex } from "./search-index.js";
 
 interface TantivyEntry {
   sessionId: string;
+  project?: string;
+  agentId?: string;
 }
 
 interface TantivySearchIndexOptions {
@@ -45,6 +50,12 @@ function docText(obs: CompressedObservation): string {
     ...obs.files,
     obs.type,
   ].join(" ");
+}
+
+function scopeMarker(kind: "project" | "agent", value: string): string {
+  // Keep the token below Tantivy's default tokenizer length limit.
+  const digest = createHash("sha256").update(value).digest("hex").slice(0, 16);
+  return `agentmemoryscope${kind}${digest}`;
 }
 
 function firstString(value: unknown): string | undefined {
@@ -90,11 +101,21 @@ export class TantivySearchIndex extends SearchIndex {
     doc.addText("concepts", obs.concepts.join(" "));
     doc.addText("files", obs.files.join(" "));
     doc.addText("type", obs.type);
-    doc.addText("body", docText(obs));
+    const scopeText = [
+      obs.project ? scopeMarker("project", obs.project) : "",
+      obs.agentId ? scopeMarker("agent", obs.agentId) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    doc.addText("body", `${docText(obs)} ${scopeText}`);
     doc.addUnsigned("importance", Math.max(0, Math.floor(obs.importance ?? 0)));
     this.writer.addDocument(doc);
     this.tantivyEntries.delete(obs.id);
-    this.tantivyEntries.set(obs.id, { sessionId: obs.sessionId });
+    this.tantivyEntries.set(obs.id, {
+      sessionId: obs.sessionId,
+      ...(obs.project ? { project: obs.project } : {}),
+      ...(obs.agentId ? { agentId: obs.agentId } : {}),
+    });
 
     while (this.tantivyEntries.size > this.maxEntries) {
       const oldest = this.tantivyEntries.keys().next().value;
@@ -118,6 +139,7 @@ export class TantivySearchIndex extends SearchIndex {
   override search(
     query: string,
     limit = 20,
+    scope?: SearchScope,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
     if (!query.trim() || this.tantivyEntries.size === 0) return [];
     this.flush();
@@ -131,7 +153,33 @@ export class TantivySearchIndex extends SearchIndex {
       "files",
       "body",
     ]);
-    const results = searcher.search(parsed, limit, true);
+    const clauses: Array<{ occur: Occur; query: Query }> = [
+      { occur: Occur.Must, query: parsed },
+    ];
+    if (scope?.project) {
+      clauses.push({
+        occur: Occur.Must,
+        query: Query.termQuery(
+          this.index.schema,
+          "body",
+          scopeMarker("project", scope.project),
+        ),
+      });
+    }
+    if (scope?.agentId) {
+      clauses.push({
+        occur: Occur.Must,
+        query: Query.termQuery(
+          this.index.schema,
+          "body",
+          scopeMarker("agent", scope.agentId),
+        ),
+      });
+    }
+    const scopedQuery = clauses.length === 1
+      ? parsed
+      : Query.booleanQuery(clauses);
+    const results = searcher.search(scopedQuery, limit, true);
     return results.hits
       .map((hit: SearchHit) => {
         const doc = searcher.doc(hit.docAddress).toDict();

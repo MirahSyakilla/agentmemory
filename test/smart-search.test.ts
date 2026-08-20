@@ -73,6 +73,7 @@ describe("Smart Search Function", () => {
   let sdk: ReturnType<typeof mockSdk>;
   let kv: ReturnType<typeof mockKV>;
   let searchResults: HybridSearchResult[];
+  let requestedSearch: { query: string; limit: number; scope?: { project?: string; agentId?: string } };
 
   beforeEach(async () => {
     sdk = mockSdk();
@@ -110,8 +111,31 @@ describe("Smart Search Function", () => {
     await kv.set("mem:obs:ses_1", "obs_1", obs1);
     await kv.set("mem:obs:ses_1", "obs_2", obs2);
 
-    const searchFn = async (_query: string, _limit: number) => searchResults;
+    requestedSearch = { query: "", limit: 0 };
+    const searchFn = async (
+      query: string,
+      limit: number,
+      scope?: { project?: string; agentId?: string },
+    ) => {
+      requestedSearch = { query, limit, scope };
+      return searchResults;
+    };
     registerSmartSearchFunction(sdk as never, kv as never, searchFn);
+  });
+
+  it("passes scope into candidate retrieval instead of over-fetching globally", async () => {
+    await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      limit: 2,
+      project: "my-project",
+      agentId: "agent-a",
+    });
+
+    expect(requestedSearch).toEqual({
+      query: "auth",
+      limit: 2,
+      scope: { project: "my-project", agentId: "agent-a" },
+    });
   });
 
   it("compact mode returns CompactSearchResult array", async () => {

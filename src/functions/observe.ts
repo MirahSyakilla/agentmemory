@@ -107,6 +107,7 @@ export function registerObserveFunction(
         timestamp: payload.timestamp,
         hookType: payload.hookType,
         raw: sanitizedRaw,
+        ...(payload.project ? { project: payload.project } : {}),
         origin: {
           channel: originChannel,
           capturedAt: payload.timestamp,
@@ -167,6 +168,10 @@ export function registerObserveFunction(
         const inheritedAgentId = payload.agentId ?? (existingSession
           ? existingSession.agentId
           : getAgentId());
+        const inheritedProject = payload.project ?? existingSession?.project;
+        if (inheritedProject) {
+          raw.project = inheritedProject;
+        }
         if (inheritedAgentId) {
           raw.agentId = inheritedAgentId;
         }
@@ -349,6 +354,7 @@ export function registerObserveFunction(
             synthetic.sessionId,
             synthetic.title + " " + (synthetic.narrative || ""),
             { kind: "synthetic", logId: synthetic.id },
+            { project: synthetic.project, agentId: synthetic.agentId },
           );
           await sdk.trigger({
             function_id: "stream::set",

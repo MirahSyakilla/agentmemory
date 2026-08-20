@@ -5,6 +5,7 @@ import type {
   CompressedObservation,
   HybridSearchResult,
   Lesson,
+  SearchScope,
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -76,7 +77,11 @@ const LESSON_CONTENT_PREVIEW_CHARS = 240;
 export function registerSmartSearchFunction(
   sdk: ISdk,
   kv: StateKV,
-  searchFn: (query: string, limit: number) => Promise<HybridSearchResult[]>,
+  searchFn: (
+    query: string,
+    limit: number,
+    scope?: SearchScope,
+  ) => Promise<HybridSearchResult[]>,
 ): void {
   sdk.registerFunction("mem::smart-search",
     async (data: {
@@ -220,18 +225,16 @@ export function registerSmartSearchFunction(
       const lessonLimit = Math.min(limit, 10);
       const includeLessons = data.includeLessons !== false;
 
-      // Over-fetch when filtering. Hybrid search can't filter on
-      // agentId (BM25/vector indexes don't carry it), so we ask the
-      // searcher for more hits than we need and trim post-filter. 3×
-      // is a defensible middle ground: enough headroom for a small
-      // workload, capped at 300 so a 100-limit request never asks for
-      // thousands of hits.
-      const overFetchLimit = filterAgentId || projectFilter
-        ? Math.min(limit * 3, 300)
-        : limit;
+      const scope: SearchScope | undefined =
+        projectFilter || filterAgentId
+          ? {
+              ...(projectFilter ? { project: projectFilter } : {}),
+              ...(filterAgentId ? { agentId: filterAgentId } : {}),
+            }
+          : undefined;
 
       const [hybridResults, lessons] = await Promise.all([
-        searchFn(data.query, overFetchLimit),
+        searchFn(data.query, limit, scope),
         includeLessons
           ? recallLessons(sdk, data.query, lessonLimit, projectFilter)
           : Promise.resolve([]),
@@ -244,7 +247,7 @@ export function registerSmartSearchFunction(
         ? (await Promise.all(
             agentScopedHybrid.map(async (result) => {
               const project = await observationProject(kv, result.observation);
-              return project === undefined || project === projectFilter ? result : null;
+              return project === projectFilter ? result : null;
             }),
           )).filter(
             (result): result is HybridSearchResult => result !== null,

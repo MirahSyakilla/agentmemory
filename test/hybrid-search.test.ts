@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
+import { VectorIndex } from "../src/state/vector-index.js";
 import { logger } from "../src/logger.js";
 import type {
   CompressedObservation,
@@ -242,6 +243,54 @@ describe("HybridSearch", () => {
     const hybrid = new HybridSearch(bm25, null, null, kv as never);
     const results = await hybrid.search("auth", 3);
     expect(results.length).toBe(3);
+  });
+
+  it("caches repeated query embeddings and applies scope to both streams", async () => {
+    const inScope = makeObs({
+      id: "obs_scope",
+      sessionId: "ses_scope",
+      project: "my-project",
+      agentId: "agent-a",
+      title: "auth scoped result",
+    });
+    const other = makeObs({
+      id: "obs_other",
+      sessionId: "ses_other",
+      project: "other-project",
+      agentId: "agent-b",
+      title: "auth other result",
+    });
+    bm25.add(inScope);
+    bm25.add(other);
+    await kv.set("mem:obs:ses_scope", inScope.id, inScope);
+    await kv.set("mem:obs:ses_other", other.id, other);
+
+    const vector = new VectorIndex();
+    vector.add(inScope.id, inScope.sessionId, new Float32Array([1, 0]), {
+      project: inScope.project,
+      agentId: inScope.agentId,
+    });
+    vector.add(other.id, other.sessionId, new Float32Array([1, 0]), {
+      project: other.project,
+      agentId: other.agentId,
+    });
+    const provider: EmbeddingProvider = {
+      name: "test-embedding",
+      dimensions: 2,
+      embed: vi.fn(async () => new Float32Array([1, 0])),
+      embedBatch: vi.fn(async (texts: string[]) =>
+        texts.map(() => new Float32Array([1, 0])),
+      ),
+    };
+
+    const hybrid = new HybridSearch(bm25, vector, provider, kv as never);
+    const scope = { project: "my-project", agentId: "agent-a" };
+    const first = await hybrid.search("auth", 1, scope);
+    const second = await hybrid.search("auth", 1, scope);
+
+    expect(first.map((result) => result.observation.id)).toEqual(["obs_scope"]);
+    expect(second.map((result) => result.observation.id)).toEqual(["obs_scope"]);
+    expect(provider.embed).toHaveBeenCalledTimes(1);
   });
 
   it("skips observations not found in KV", async () => {

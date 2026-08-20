@@ -1,4 +1,4 @@
-import type { CompressedObservation } from "../types.js";
+import type { CompressedObservation, SearchScope } from "../types.js";
 
 export interface LexicalSearchHit {
   obsId: string;
@@ -13,6 +13,10 @@ export interface LexicalStore {
   add(obs: CompressedObservation): void | Promise<void>;
   has(id: string): boolean;
   remove(id: string): void | Promise<void>;
-  search(query: string, limit?: number): LexicalSearchHit[] | Promise<LexicalSearchHit[]>;
+  search(
+    query: string,
+    limit?: number,
+    scope?: SearchScope,
+  ): LexicalSearchHit[] | Promise<LexicalSearchHit[]>;
   clear(): void | Promise<void>;
 }
